@@ -137,3 +137,8 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+serviceAccount.json
+
+RENDER_DEPLOYMENT.md
+ENV_VARIABLES.md
+DEPLOYMENT.md

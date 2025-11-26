@@ -341,6 +341,23 @@ io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
 
       console.log(`[MESSAGE] 📤 From ${senderId} in room ${roomId}: "${text.substring(0, 50)}..."`);
 
+      // Get user information from Firestore
+      let userInfo: { id: string; email: string; nickname?: string; displayName?: string } | undefined;
+      try {
+        const userDoc = await db.collection("users").doc(senderId).get();
+        if (userDoc.exists) {
+          const userData = userDoc.data();
+          userInfo = {
+            id: senderId,
+            email: userData?.email || "",
+            nickname: userData?.nickname,
+            displayName: userData?.displayName,
+          };
+        }
+      } catch (userError) {
+        console.error(`[MESSAGE] ⚠️ Error fetching user info for ${senderId}:`, userError);
+      }
+
       // Create message object
       const message: Message = {
         senderId,
@@ -352,10 +369,11 @@ io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
       // Save message to Firestore
       const messageId = await saveMessage(message);
 
-      // Broadcast message to all users in the room (including sender)
+      // Broadcast message to all users in the room (including sender) with user info
       io.to(roomId).emit("newMessage", {
         ...message,
         id: messageId,
+        user: userInfo, // Include user information
       });
 
       console.log(`[MESSAGE] ✅ Message broadcast to room ${roomId}`);

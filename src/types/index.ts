@@ -99,17 +99,16 @@ export interface RoomActionResponse {
 export interface ServerToClientEvents {
   // User connection events
   usersOnline: (users: OnlineUser[]) => void;
-  
+
   // Room events
   join_room_success: (response: RoomActionResponse) => void;
   join_room_error: (response: RoomActionResponse) => void;
-  
+  userLeft: (response: RoomActionResponse) => void;
+  userDisconnected: (response: RoomActionResponse) => void;
+
   // Message events
   newMessage: (message: ReceiveMessagePayload) => void;
   receiveMessage: (message: ReceiveMessagePayload) => void;
-  
-  // Disconnection events
-  disconnect: (response: RoomActionResponse) => void;
 }
 
 /**

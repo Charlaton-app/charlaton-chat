@@ -404,7 +404,7 @@ io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
       const { users: updatedUsers } = removeUserConnection(socket.id);
 
       // Notify others in the room
-      socket.to(roomId).emit("disconnect", {
+      socket.to(roomId).emit("userLeft", {
         success: true,
         message: `User ${user?.email} left the room`,
         user,
@@ -433,7 +433,7 @@ io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, 
 
       if (disconnectedUser && roomId) {
         // Notify others in the room
-        socket.to(roomId).emit("disconnect", {
+        socket.to(roomId).emit("userDisconnected", {
           success: true,
           message: `User ${user?.email} disconnected`,
           user,

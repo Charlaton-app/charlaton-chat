@@ -1,11 +1,18 @@
 /**
- * Types and interfaces for Charlaton Chat Microservice
+ * Shared TypeScript interfaces for the Charlaton Chat microservice.
+ *
+ * These types are imported by both the Socket.IO server (`index.ts`) and
+ * the service layer, and they define the contract between backend and
+ * frontend for all real‑time events and REST payloads.
  */
 
 // ===== User Types =====
 
 /**
- * User representation in online users list
+ * Lightweight representation of a user that is currently online.
+ *
+ * This structure is used only for presence tracking and does not contain
+ * any PII beyond the user identifier.
  */
 export interface OnlineUser {
   socketId: string;
@@ -14,7 +21,9 @@ export interface OnlineUser {
 }
 
 /**
- * JWT User payload from authentication
+ * Minimal JWT payload shape expected after verifying either:
+ * - a backend‑issued access token, or
+ * - a Firebase ID token (normalized by the auth middleware).
  */
 export interface JWTUser {
   id: string;
@@ -26,7 +35,10 @@ export interface JWTUser {
 // ===== Message Types =====
 
 /**
- * Message data structure for room chat
+ * Base message shape exchanged between client and server.
+ *
+ * `createAt` can be either a Firestore `Timestamp` (when loaded from
+ * the database) or a numeric epoch (when coming directly from Socket.IO).
  */
 export interface Message {
   senderId: string;
@@ -36,7 +48,10 @@ export interface Message {
 }
 
 /**
- * Message stored in Firestore (includes ID)
+ * Message record as stored/read from Firestore.
+ *
+ * The `id` field is optional because Firestore does not include it
+ * inside `doc.data()`; we attach it manually where needed.
  */
 export interface StoredMessage extends Message {
   id?: string;
@@ -45,7 +60,7 @@ export interface StoredMessage extends Message {
 // ===== Socket Event Payloads =====
 
 /**
- * Payload for sending a message
+ * Payload emitted by the client when sending a new message via Socket.IO.
  */
 export interface SendMessagePayload {
   senderId: string;
@@ -54,7 +69,10 @@ export interface SendMessagePayload {
 }
 
 /**
- * Payload for receiving a message
+ * Payload delivered by the server when broadcasting a new message.
+ *
+ * It extends the base `Message` type and may optionally include the
+ * persisted `id` and a small user descriptor used by the UI.
  */
 export interface ReceiveMessagePayload extends Message {
   id?: string;
@@ -67,7 +85,11 @@ export interface ReceiveMessagePayload extends Message {
 }
 
 /**
- * Payload for joining a room
+ * Payload describing a user joining a room.
+ *
+ * Currently this is not used directly by Socket.IO events (we pass
+ * only the `roomId`), but it is kept here to document the shape used
+ * by higher‑level services and future REST endpoints.
  */
 export interface JoinRoomPayload {
   roomId: string;
@@ -75,7 +97,7 @@ export interface JoinRoomPayload {
 }
 
 /**
- * Payload for leaving a room
+ * Payload describing a user leaving a room.
  */
 export interface LeaveRoomPayload {
   roomId: string;
@@ -83,7 +105,8 @@ export interface LeaveRoomPayload {
 }
 
 /**
- * Success/Error response for room actions
+ * Generic success/error response used by room‑level events such as
+ * `join_room_success`, `join_room_error`, and presence‑related events.
  */
 export interface RoomActionResponse {
   success: boolean;
@@ -94,7 +117,10 @@ export interface RoomActionResponse {
 // ===== Socket Event Maps for Type Safety =====
 
 /**
- * Events that the server can send to clients
+ * Socket.IO events that the server can emit to connected clients.
+ *
+ * Keeping this interface in sync with the actual `io.emit`/`socket.emit`
+ * calls in `index.ts` gives us end‑to‑end type safety for real‑time flows.
  */
 export interface ServerToClientEvents {
   // User connection events
@@ -112,7 +138,7 @@ export interface ServerToClientEvents {
 }
 
 /**
- * Events that clients can send to the server
+ * Socket.IO events that clients are allowed to emit to the server.
  */
 export interface ClientToServerEvents {
   // User events
@@ -130,7 +156,8 @@ export interface ClientToServerEvents {
 }
 
 /**
- * Data stored in socket.data during connection
+ * Per‑socket metadata stored in `socket.data` during the lifetime
+ * of a connection. Populated by the authentication middleware.
  */
 export interface SocketData {
   user?: JWTUser;

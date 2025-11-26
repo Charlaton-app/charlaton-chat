@@ -34,14 +34,32 @@ import type {
 } from "./types";
 
 // ===== Initialize Express App =====
+/**
+ * Express application instance used to expose HTTP APIs for health checks
+ * and read-only helpers (messages history, online users, etc.).
+ */
 const app = express();
+
+/**
+ * Node HTTP server wrapping the Express app.
+ * This server is also used as the transport layer for Socket.IO.
+ */
 const httpServer = createServer(app);
 
 // ===== Parse Environment Variables =====
 const PORT = Number(process.env.PORT) || 4000;
 const ACCESS_SECRET = process.env.ACCESS_SECRET || process.env.JWT_SECRET || "default-secret-change-me";
 
-// Parse CORS origins from environment
+/**
+ * Build the list of allowed CORS origins for both Express and Socket.IO.
+ *
+ * Priority:
+ * 1. `FRONTEND_URL` env var (single origin, usually the production frontend).
+ * 2. Additional comma‑separated origins from `ORIGIN`.
+ * 3. In non‑production environments, common localhost ports are always allowed.
+ *
+ * @returns Array of normalized origin URLs.
+ */
 const getAllowedOrigins = (): string[] => {
   const origins: string[] = [];
 
@@ -103,7 +121,12 @@ app.use(
 
 app.use(express.json());
 
-// ===== Initialize Socket.IO =====
+/**
+ * Socket.IO server instance responsible for all real‑time communication.
+ *
+ * - Auth is handled in the `io.use` middleware below.
+ * - CORS configuration is shared with the Express app.
+ */
 const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData>(
   httpServer,
   {
@@ -117,7 +140,10 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData
 // ===== HTTP REST Endpoints =====
 
 /**
- * Health check endpoint
+ * Basic health‑check endpoint for load‑balancers and uptime monitors.
+ *
+ * Returns a small JSON payload with service metadata and the
+ * number of users currently tracked as online.
  */
 app.get("/", (req, res) => {
   res.json({
@@ -130,7 +156,10 @@ app.get("/", (req, res) => {
 });
 
 /**
- * Health check endpoint
+ * Lightweight liveness endpoint exposing process uptime and timestamp.
+ *
+ * This is intentionally small and unauthenticated so that platforms like
+ * Render / Railway can use it for health probes.
  */
 app.get("/health", (req, res) => {
   res.json({
@@ -141,8 +170,15 @@ app.get("/health", (req, res) => {
 });
 
 /**
- * Get messages from a specific room
- * Query params: limit (optional, default: 100)
+ * REST endpoint to fetch recent messages for a given room.
+ *
+ * Path params:
+ * - `roomId`: Room identifier.
+ *
+ * Query params:
+ * - `limit` (optional): Max number of messages to return (default: 100).
+ *
+ * The data comes from Firestore via `getRoomMessages` service.
  */
 app.get("/api/messages/:roomId", async (req, res) => {
   try {
@@ -175,7 +211,13 @@ app.get("/api/messages/:roomId", async (req, res) => {
 });
 
 /**
- * Get online users in a specific room
+ * REST endpoint to list online users in a specific room.
+ *
+ * Path params:
+ * - `roomId`: Room identifier.
+ *
+ * The data is served from an in‑memory registry maintained by
+ * the `connectionService`.
  */
 app.get("/api/users/online/:roomId", (req, res) => {
   try {
@@ -206,7 +248,17 @@ app.get("/api/users/online/:roomId", (req, res) => {
 });
 
 // ===== Socket.IO Authentication Middleware =====
-
+/**
+ * Socket.IO middleware that authenticates every incoming connection.
+ *
+ * The client is expected to pass a JWT in `socket.handshake.auth.token`.
+ * The middleware will:
+ * 1. Try to verify it as a backend JWT using `ACCESS_SECRET`.
+ * 2. If that fails, fall back to verifying it as a Firebase ID token.
+ *
+ * On success, a lightweight `JWTUser` is attached to `socket.data`.
+ * On failure, the connection is rejected with an authentication error.
+ */
 io.use(async (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>, next) => {
   try {
     const token = socket.handshake.auth?.token;
@@ -257,7 +309,15 @@ io.use(async (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, Soc
 });
 
 // ===== Socket.IO Connection Handler =====
-
+/**
+ * Main Socket.IO connection handler.
+ *
+ * Responsible for:
+ * - Joining/leaving rooms.
+ * - Broadcasting presence updates (`usersOnline`).
+ * - Persisting and broadcasting chat messages.
+ * - Cleaning up in‑memory connections on disconnect.
+ */
 io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>) => {
   console.log(`[CONNECTION] 🟢 New connection: ${socket.id}`);
   

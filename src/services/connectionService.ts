@@ -1,24 +1,41 @@
 /**
  * Connection Service
- * Manages online users and their room connections
+ *
+ * This module maintains an in‑memory registry of online users and the rooms
+ * they are currently connected to. It is intentionally simple and stateless
+ * (no persistence) because:
+ *
+ * - Socket.IO already handles transport‑level presence.
+ * - The registry only needs to live for the lifetime of a single Node process.
+ *
+ * If you scale this microservice horizontally you will need to replace this
+ * in‑memory store with a shared backend (e.g. Redis) so all instances have
+ * a consistent view of online users.
  */
 
 import type { OnlineUser } from "../types";
 
 /**
- * In-memory store for online users
- * Format: { socketId, userId, roomId }
+ * In‑memory store for online users.
+ *
+ * Each record links a Socket.IO connection (`socketId`) with a logical
+ * application user (`userId`) and a room (`roomId`).
+ *
+ * Shape: `{ socketId, userId, roomId }`
  */
 let onlineUsers: OnlineUser[] = [];
 
 /**
- * Add or update a user connection
- * If user already exists with same roomId, update their socketId (reconnection)
- * 
- * @param socketId - Socket connection ID
- * @param userId - User ID
- * @param roomId - Room ID they're connected to
- * @returns Updated list of online users
+ * Add or update a user connection.
+ *
+ * If the user is already present in `onlineUsers` for the same `roomId`,
+ * this function treats the call as a reconnection and simply updates
+ * the `socketId` (e.g. the user refreshed the page).
+ *
+ * @param socketId - Active Socket.IO connection ID.
+ * @param userId   - Application‑level user identifier.
+ * @param roomId   - Room the user is joining.
+ * @returns Updated list of all online users.
  */
 export function addUserConnection(
   socketId: string,
@@ -44,10 +61,14 @@ export function addUserConnection(
 }
 
 /**
- * Remove a user connection by socket ID
- * 
- * @param socketId - Socket connection ID to remove
- * @returns Updated list of online users
+ * Remove a user connection by socket ID.
+ *
+ * Used from both the explicit `leaveRoom` handler and the low‑level
+ * `disconnect` event to keep the registry in sync with Socket.IO.
+ *
+ * @param socketId - Socket.IO connection ID to remove.
+ * @returns Object containing the updated list of users and (optionally)
+ *          the user that was disconnected.
  */
 export function removeUserConnection(socketId: string): {
   users: OnlineUser[];
@@ -69,48 +90,51 @@ export function removeUserConnection(socketId: string): {
 }
 
 /**
- * Get all online users in a specific room
- * 
- * @param roomId - Room ID to filter by
- * @returns Array of online users in the specified room
+ * Get all online users in a specific room.
+ *
+ * @param roomId - Room identifier to filter by.
+ * @returns Array of users currently registered as online in that room.
  */
 export function getUsersInRoom(roomId: string): OnlineUser[] {
   return onlineUsers.filter((user) => user.roomId === roomId);
 }
 
 /**
- * Get all online users (across all rooms)
- * 
- * @returns Array of all online users
+ * Get all online users across all rooms.
+ *
+ * @returns Shallow copy of the internal `onlineUsers` array.
  */
 export function getAllOnlineUsers(): OnlineUser[] {
   return onlineUsers;
 }
 
 /**
- * Check if a user is online in a specific room
- * 
- * @param userId - User ID to check
- * @param roomId - Room ID to check
- * @returns Boolean indicating if user is online in that room
+ * Check whether a user is currently online in a given room.
+ *
+ * @param userId - User identifier to look for.
+ * @param roomId - Room identifier to scope the lookup.
+ * @returns `true` if a matching record exists, otherwise `false`.
  */
 export function isUserInRoom(userId: string, roomId: string): boolean {
   return onlineUsers.some((user) => user.userId === userId && user.roomId === roomId);
 }
 
 /**
- * Get the total count of online users
- * 
- * @returns Number of online users
+ * Get the total number of online user connections across all rooms.
+ *
+ * @returns Count of items in the `onlineUsers` registry.
  */
 export function getOnlineUserCount(): number {
   return onlineUsers.length;
 }
 
 /**
- * Clear all connections (for testing/restart)
- * 
- * @returns Empty array
+ * Clear the entire in‑memory connection registry.
+ *
+ * Primarily useful in automated tests or when programmatically resetting
+ * the service without restarting the Node process.
+ *
+ * @returns The now‑empty `onlineUsers` array.
  */
 export function clearAllConnections(): OnlineUser[] {
   console.log("[CONNECTION] 🧹 Clearing all connections");

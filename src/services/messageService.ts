@@ -1,7 +1,13 @@
 /**
  * Message Service
- * Handles message persistence and retrieval from Firestore
- * Compatible with Charlaton's room-based message structure: rooms/{roomId}/messages
+ *
+ * Provides a thin abstraction over Firestore to store and retrieve chat
+ * messages for Charlaton rooms. Messages are stored under:
+ *
+ * `rooms/{roomId}/messages/{messageId}`
+ *
+ * All helpers in this module are safe to call from Socket.IO handlers
+ * and REST endpoints.
  */
 
 import { db } from "../config/firebase";
@@ -9,11 +15,13 @@ import type { StoredMessage, Message } from "../types";
 import admin from "firebase-admin";
 
 /**
- * Save a new message to Firestore
- * Messages are stored in subcollection: rooms/{roomId}/messages
- * 
- * @param message - Message data to save
- * @returns Promise with message ID
+ * Persist a new chat message in Firestore.
+ *
+ * The message is stored inside the room's `messages` sub‑collection and
+ * enriched with a server‑side timestamp.
+ *
+ * @param message - Message payload containing at least `roomId`, `senderId` and `text`.
+ * @returns Promise that resolves to the generated Firestore document ID.
  */
 export async function saveMessage(message: Message): Promise<string> {
   try {
@@ -46,12 +54,15 @@ export async function saveMessage(message: Message): Promise<string> {
 }
 
 /**
- * Get all messages from a specific room
- * Retrieves from: rooms/{roomId}/messages
- * 
- * @param roomId - Room ID to fetch messages from
- * @param limit - Maximum number of messages to retrieve (default: 100)
- * @returns Promise with array of messages sorted by timestamp (oldest first)
+ * Fetch recent messages for a given room.
+ *
+ * Data is loaded from the `rooms/{roomId}/messages` sub‑collection, ordered
+ * by `createAt` descending, then reversed so the caller receives messages
+ * in chronological order (oldest first).
+ *
+ * @param roomId - Room identifier to fetch messages from.
+ * @param limit  - Maximum number of messages to retrieve (default: 100).
+ * @returns Promise resolving to an array of `StoredMessage` objects.
  */
 export async function getRoomMessages(
   roomId: string,
@@ -93,10 +104,10 @@ export async function getRoomMessages(
 }
 
 /**
- * Delete a message by ID from a specific room
- * 
- * @param roomId - Room ID containing the message
- * @param messageId - Message document ID to delete
+ * Delete a single message from a room.
+ *
+ * @param roomId    - Room identifier that owns the message.
+ * @param messageId - Firestore document ID of the message to delete.
  */
 export async function deleteMessage(roomId: string, messageId: string): Promise<void> {
   try {
@@ -119,10 +130,12 @@ export async function deleteMessage(roomId: string, messageId: string): Promise<
 }
 
 /**
- * Get the count of messages in a room
- * 
- * @param roomId - Room ID to count messages from
- * @returns Promise with message count
+ * Count how many messages exist in a given room.
+ *
+ * This performs a lightweight collection read and returns `snapshot.size`.
+ *
+ * @param roomId - Room identifier to count messages for.
+ * @returns Promise resolving to the number of messages in that room.
  */
 export async function getMessageCount(roomId: string): Promise<number> {
   try {

@@ -58,6 +58,12 @@ export interface SendMessagePayload {
  */
 export interface ReceiveMessagePayload extends Message {
   id?: string;
+  user?: {
+    id: string;
+    email: string;
+    nickname?: string;
+    displayName?: string;
+  };
 }
 
 /**

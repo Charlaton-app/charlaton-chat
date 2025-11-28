@@ -5,7 +5,7 @@
 
 import express from "express";
 import { createServer } from "http";
-import { Server, Socket } from "socket.io";
+import { Server } from "socket.io";
 import cors from "cors";
 import jwt from "jsonwebtoken";
 import "dotenv/config";
@@ -42,6 +42,7 @@ import type {
   SendMessagePayload,
   Message,
 } from "./types";
+import { Socket } from "dgram";
 
 // ===== Initialize Express App =====
 /**
@@ -241,6 +242,21 @@ io.use(async (socket, next) => {
   }
 });
 
+async function emitRoomUsersState(roomId: string) {
+  const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+  const sockets = await io.in(roomId).fetchSockets();
+
+  const users = sockets.map(s => ({
+    userId: s.data.userId ?? s.data.user?.id,
+    email: s.data.user?.email,
+    roomId: s.data.roomId
+  }));
+
+  io.to(roomId).emit("number_usersOnline", count);
+  io.to(roomId).emit("usersOnline", users);
+}
+
+
 // ===== Socket.IO Connection Handler =====
 /**
  * Main Socket.IO connection handler.
@@ -282,46 +298,165 @@ io.on("connection", (socket) => {
   
       const userId = socket.data.userId || user.id;
       socket.data.roomId = roomId;
+
+      const roomSnap = await db.collection("rooms").doc(roomId).get();
+      const isPrivate = roomSnap.data()?.isPrivate;
+
+      async function handleJoin() {
   
-      const accessSnap = await getRoomAccessForUser(userId, roomId);
+        socket.data.roomId = roomId;
+        socket.join(roomId);
+      
+        const connectionSnap = await createConnection(userId, roomId);
+        if (!connectionSnap.success) {
+          socket.emit("join_room_error", { user: socket.data.user, message: "error al crear conexión", success: false });
+          return false;
+        }
+      
+        socket.emit("join_room_success", { user: socket.data.user, message: "conectado correctamente", success: true });
+        socket.to(roomId).emit("join_room_success", { user: socket.data.user, message: "acceso exitoso", success: true });
+      
+        await emitRoomUsersState(roomId);
+        return true;
+      }
+
+      if(!isPrivate){
+
+        await handleJoin();
+        await emitRoomUsersState(roomId);
+
+      } else {
+
+        const accessSnap = await getRoomAccessForUser(userId, roomId);
   
-      if(!accessSnap.success){
-  
-        socket.emit("join_room_error", {user: user, message: "usuario sin permisos", success : false});
+        if(!accessSnap.success){
     
-        console.log("Usuario sin permiso...");
+          socket.emit("join_room_error", {user: user, message: "usuario sin permisos", success : false});
+      
+          console.log("Usuario sin permiso...");
+      
+          socket.disconnect(true);
+      
+          return;
+        }
     
-        socket.disconnect(true);
-    
-        return;
+        await handleJoin();
+        await emitRoomUsersState(roomId);  
+
       }
   
-      socket.data.roomId = roomId;
-  
-      socket.join(roomId);
-  
-      console.log("usuario ingresa a la sala...");
-  
-      const connectionSnap = await createConnection(userId, roomId);
-  
-      if (!connectionSnap.success){
-  
-        socket.emit("join_room_error",{user:user, message: "error al crear conexión", success: false});
-        return;
-      } 
-  
-      socket.emit("join_room_success",{user:user, message: "conectado correctamente", success: true });
-      socket.to(roomId).emit("join_room_success",{user:user, message: "acceso exitoso", success: true});
-
     } catch(error){
       console.error("join_room error:", error);
       socket.emit("join_room_error", { user, message: "Error interno", success: false });
+      socket.disconnect(true);
     }
 
    
   });
+  
+    // ===== JOINS_IN_ROOM EVENT =====
+
+  socket.on("joins_in_room", async (roomId: string) => {
+
+    const socketsInRoom = io.sockets.adapter.rooms.get(roomId);
+    const userId = socket.data.userId;
+  
+    if(!socketsInRoom){
+      socket.emit("joins_in_room_error",{
+        success: false,
+        message: `no hay usuarios en la sala ${roomId}`,
+        userId: userId
+      });
+      return;
+    }
+  
+    const users : string[] = [];
+  
+    for (const socketId of socketsInRoom){
+      const s = io.sockets.sockets.get(socketId);
+      const userId = s?.data.userId;
+      if(s && userId){
+        users.push(userId);
+      }
+    }
+
+    socket.emit("room_users", users);
+  });
+
+  // ===== JOINS EVENT =====
+
+  socket.on("joins",async () => {
+    const users = [];
+
+    for (const socket of io.sockets.sockets.values()) {
+        if (socket.data.user) {
+            users.push(socket.data.user);
+        }
+    }
+
+    socket.emit("joins_users",users);
+  })
+
+  // ===== WebRTC SIGNALS =====
+
+  // Cuando alguien envía una oferta WebRTC
+  socket.on("webrtc_offer", ({ roomId, targetUserId, sdp }) => {
+    // Buscar socket del target en la sala
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_offer", {
+          senderId: socket.data.userId,
+          sdp,
+        });
+        break;
+      }
+    }
+  });
+
+  // Cuando alguien envía una respuesta WebRTC
+  socket.on("webrtc_answer", ({ roomId, targetUserId, sdp }) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_answer", {
+          senderId: socket.data.userId,
+          sdp,
+        });
+        break;
+      }
+    }
+  });
+
+
+  // Cuando alguien envia sus ICE candidates
+  socket.on("webrtc_ice_candidate", ({ roomId, targetUserId, candidate }) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_ice_candidate", {
+          senderId: socket.data.userId,
+          candidate,
+        });
+        break;
+      }
+    }
+  });
+
+
   // ===== SEND MESSAGE EVENT =====
-  socket.on("message", async (msg, visibility, target) => {
+
+  socket.on("message", async ({ msg, visibility, target} ) => {
 
     if (!socket.data.userId) return;
     
@@ -383,7 +518,7 @@ io.on("connection", (socket) => {
 
     if(visibility === "private"){
       
-      for (const socketId of room) {
+      for (const socketId of room) { // recuerde que room es un set de strings, un conjuntos de string
 
         const clientSocket = io.sockets.sockets.get(socketId);
         if (!clientSocket) continue;
@@ -432,6 +567,8 @@ io.on("connection", (socket) => {
   
   });
 
+  // ===== GRANT ACCESS EVENT ====
+
   socket.on("grant_access", async ({ roomId, targetUserId }) => {
 
     if (!roomId) return;
@@ -444,8 +581,7 @@ io.on("connection", (socket) => {
       });
     }    
 
-    const admin = socket.data.user;
-    const adminId = admin.id;
+    const adminId = socket.data.userId;
     
     const isAdmin = await existsAdmin(roomId, adminId);
     const roomSnap = await db.collection("rooms").doc(roomId).get();
@@ -482,9 +618,8 @@ io.on("connection", (socket) => {
   });
 
 
-
   // ===== LEAVE ROOM EVENT =====
-  socket.on("disconect", async () => {
+  socket.on("disconnect", async (reason) => {
     try {
 
       const roomId = socket.data.roomId;
@@ -501,22 +636,13 @@ io.on("connection", (socket) => {
         });
       }
 
-      const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
-      const sockets = await io.in(roomId).fetchSockets();
-
-      const users = sockets.map(s => ({
-        userId: s.data.user.id,      
-        email: s.data.user.email,    
-        roomId: s.data.roomId        
-      }));
-
-      io.to(roomId).emit("number_usersOnline",count);
-      io.to(roomId).emit("usersOnline",users);
+      await emitRoomUsersState(roomId);
 
     } catch (error: any) {
       console.error("[ROOM] Error leaving room:", error.message);
     }
   });
+
 
   // ===== DISCONNECT EVENT =====
   socket.on("leaveRoom", async () => {
@@ -539,18 +665,7 @@ io.on("connection", (socket) => {
 
       socket.leave(roomId);
 
-      const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
-      const sockets = await io.in(roomId).fetchSockets();
-
-      const users = sockets.map(s => ({
-        userId: s.data.user.id,      
-        email: s.data.user.email,    
-        roomId: s.data.roomId        
-      }));
-
-      io.to(roomId).emit("number_usersOnline",count);
-      io.to(roomId).emit("usersOnline",users);
-
+      await emitRoomUsersState(roomId);
 
     } catch(error: any){
       socket.emit("disconect_error", { user: null, message: "Error interno", success: false });

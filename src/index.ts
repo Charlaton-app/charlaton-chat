@@ -255,22 +255,27 @@ io.use(async (socket, next) => {
  */
 async function emitRoomUsersState(roomId: string) {
   console.log(`[EMIT_USERS] Starting to emit room state for ${roomId}`);
-  
+
   const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
   const sockets = await io.in(roomId).fetchSockets();
 
-  console.log(`[EMIT_USERS] Room ${roomId} has ${count} sockets, fetching ${sockets.length} socket details`);
+  console.log(
+    `[EMIT_USERS] Room ${roomId} has ${count} sockets, fetching ${sockets.length} socket details`
+  );
 
   // Fetch complete user data from Firebase for each connected socket
   const usersPromises = sockets.map(async (s) => {
     const userId = String(s.data.userId ?? s.data.user?.id);
-    
-    if (!userId || userId === 'undefined' || userId === 'null') {
-      console.error(`[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`, {
-        userId: s.data.userId,
-        user: s.data.user,
-        roomId: s.data.roomId
-      });
+
+    if (!userId || userId === "undefined" || userId === "null") {
+      console.error(
+        `[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`,
+        {
+          userId: s.data.userId,
+          user: s.data.user,
+          roomId: s.data.roomId,
+        }
+      );
       return null; // Return null for invalid users
     }
 
@@ -279,36 +284,49 @@ async function emitRoomUsersState(roomId: string) {
     try {
       // Get complete user data from Firebase
       const userDoc = await db.collection("users").doc(userId).get();
-      
+
       if (!userDoc.exists) {
-        console.warn(`[EMIT_USERS] ⚠️ User document not found in Firebase for ${userId}`);
+        console.warn(
+          `[EMIT_USERS] ⚠️ User document not found in Firebase for ${userId}`
+        );
       }
-      
+
       const userData = userDoc.exists ? userDoc.data() : null;
 
       const userInfo = {
         userId,
         email: userData?.email || s.data.user?.email,
         roomId: s.data.roomId || roomId,
-        user: userData ? {
-          id: userId,
-          email: userData.email || s.data.user?.email,
-          displayName: userData.displayName || userData.nickname || userData.email?.split('@')[0],
-          nickname: userData.nickname,
-          photoURL: userData.photoURL,
-        } : {
-          id: userId,
-          email: s.data.user?.email,
-          displayName: s.data.user?.email?.split('@')[0] || 'Usuario',
-          nickname: null,
-          photoURL: null,
-        },
+        user: userData
+          ? {
+              id: userId,
+              email: userData.email || s.data.user?.email,
+              displayName:
+                userData.displayName ||
+                userData.nickname ||
+                userData.email?.split("@")[0],
+              nickname: userData.nickname,
+              photoURL: userData.photoURL,
+            }
+          : {
+              id: userId,
+              email: s.data.user?.email,
+              displayName: s.data.user?.email?.split("@")[0] || "Usuario",
+              nickname: null,
+              photoURL: null,
+            },
       };
 
-      console.log(`[EMIT_USERS] ✅ User data prepared for ${userId}:`, userInfo.user?.displayName);
+      console.log(
+        `[EMIT_USERS] ✅ User data prepared for ${userId}:`,
+        userInfo.user?.displayName
+      );
       return userInfo;
     } catch (error) {
-      console.error(`[EMIT_USERS] ❌ Error fetching user data for ${userId}:`, error);
+      console.error(
+        `[EMIT_USERS] ❌ Error fetching user data for ${userId}:`,
+        error
+      );
       return {
         userId,
         email: s.data.user?.email,
@@ -316,7 +334,7 @@ async function emitRoomUsersState(roomId: string) {
         user: {
           id: userId,
           email: s.data.user?.email,
-          displayName: 'Usuario',
+          displayName: "Usuario",
           nickname: null,
           photoURL: null,
         },
@@ -325,15 +343,17 @@ async function emitRoomUsersState(roomId: string) {
   });
 
   const allUsers = await Promise.all(usersPromises);
-  
+
   // Filter out null entries (invalid users)
   const users = allUsers.filter((u) => u !== null);
-  
-  console.log(`[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${allUsers.length} total)`);
+
+  console.log(
+    `[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${allUsers.length} total)`
+  );
 
   io.to(roomId).emit("number_usersOnline", users.length);
   io.to(roomId).emit("usersOnline", users);
-  
+
   console.log(`[EMIT_USERS] ✅ Room state emitted for ${roomId}`);
 }
 
@@ -391,7 +411,7 @@ io.on("connection", (socket) => {
 
       // Check if room exists
       const roomSnap = await db.collection("rooms").doc(roomId).get();
-      
+
       if (!roomSnap.exists) {
         console.error(`[ROOM] ❌ Room ${roomId} does not exist`);
         socket.emit("join_room_error", {
@@ -404,7 +424,9 @@ io.on("connection", (socket) => {
 
       const roomData = roomSnap.data();
       const isPrivate = roomData?.isPrivate || roomData?.private || false;
-      console.log(`[ROOM] 🔒 Room ${roomId} is ${isPrivate ? 'PRIVATE' : 'PUBLIC'}`);
+      console.log(
+        `[ROOM] 🔒 Room ${roomId} is ${isPrivate ? "PRIVATE" : "PUBLIC"}`
+      );
 
       /**
        * Handles the actual joining logic for a room.
@@ -416,14 +438,16 @@ io.on("connection", (socket) => {
         // Set room data BEFORE creating connection
         socket.data.roomId = roomId;
         socket.data.userId = userId;
-        
+
         console.log(`[ROOM] 🚪 Joining socket to room ${roomId}`);
         socket.join(roomId);
 
         // Create connection in Firestore with userId as string
-        console.log(`[ROOM] 💾 Creating Firestore connection for userId: ${userId}`);
+        console.log(
+          `[ROOM] 💾 Creating Firestore connection for userId: ${userId}`
+        );
         const connectionSnap = await createConnection(userId, roomId);
-        
+
         if (!connectionSnap.success) {
           console.error(`[ROOM] ❌ Failed to create connection for ${userId}`);
           socket.emit("join_room_error", {
@@ -456,7 +480,7 @@ io.on("connection", (socket) => {
 
         console.log(`[ROOM] 📢 Emitting room state to all users in ${roomId}`);
         await emitRoomUsersState(roomId);
-        
+
         return true;
       }
 
@@ -469,7 +493,9 @@ io.on("connection", (socket) => {
         const accessSnap = await getRoomAccessForUser(userId, roomId);
 
         if (!accessSnap.success) {
-          console.error(`[ROOM] ❌ User ${userId} has no access to private room ${roomId}`);
+          console.error(
+            `[ROOM] ❌ User ${userId} has no access to private room ${roomId}`
+          );
           socket.emit("join_room_error", {
             user: user,
             message: "usuario sin permisos para sala privada",
@@ -695,6 +721,19 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Get user data from Firebase for complete message info
+    const userDoc = await db.collection("users").doc(userId).get();
+    const userData = userDoc.exists ? userDoc.data() : null;
+
+    const userInfo = {
+      id: userId,
+      email: userData?.email || socket.data.user?.email || "",
+      displayName: userData?.displayName || userData?.nickname || userData?.email?.split("@")[0] || "Usuario",
+      nickname: userData?.nickname || null,
+    };
+
+    console.log(`[MESSAGE] User ${userId} (${userInfo.displayName}) sending message`);
+
     const data = {
       userId: userId,
       roomId: roomId,
@@ -712,35 +751,63 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const messagePayload = {
+      id: message.message.id,
+      content: msg,
+      userId: userId,
+      roomId: roomId,
+      visibility: visibility,
+      createdAt: new Date().toISOString(),
+      user: userInfo,
+      success: true,
+    };
+
     if (visibility === "public") {
-      socket.emit("message_success", {
-        content: msg,
-        success: true,
-        visibility: "public",
-      });
-      socket.to(roomId).emit("new_success", {
-        content: msg,
-        success: true,
-        visibility: "public",
-      });
+      // Send to sender with user info
+      socket.emit("message_success", messagePayload);
+      // Broadcast to others with user info
+      socket.to(roomId).emit("new_success", messagePayload);
+      console.log(`[MESSAGE] Public message broadcasted to room ${roomId}`);
     }
 
     if (visibility === "private") {
       for (const socketId of room) {
-        // recuerde que room es un set de strings, un conjuntos de string
-
         const clientSocket = io.sockets.sockets.get(socketId);
         if (!clientSocket) continue;
 
         if (sendMessageTo(target, clientSocket.data.userId)) {
-          clientSocket.emit("message_success", {
-            content: msg,
-            success: true,
-            visibility: "private",
-          });
+          clientSocket.emit("message_success", messagePayload);
         }
       }
+      console.log(`[MESSAGE] Private message sent to ${target.length} recipients`);
     }
+  });
+
+  // ===== MEDIA STATE CHANGE EVENTS =====
+  /**
+   * Handler for 'media_state_changed' event.
+   * Broadcasts microphone and camera state changes to all participants in the room.
+   *
+   * @event media_state_changed
+   * @param {Object} payload - The media state payload
+   * @param {boolean} payload.micEnabled - Whether microphone is enabled
+   * @param {boolean} payload.cameraEnabled - Whether camera is enabled
+   * @emits user_media_changed - Notifies other participants about media state changes
+   */
+  socket.on("media_state_changed", async ({ micEnabled, cameraEnabled }) => {
+    const roomId = socket.data.roomId;
+    const userId = socket.data.userId;
+
+    if (!roomId || !userId) return;
+
+    console.log(`[MEDIA] User ${userId} changed media state: mic=${micEnabled}, camera=${cameraEnabled}`);
+
+    // Broadcast to all other users in room
+    socket.to(roomId).emit("user_media_changed", {
+      userId,
+      micEnabled,
+      cameraEnabled,
+    });
   });
 
   // ===== SEND ACCESS EVENT ====
@@ -909,6 +976,38 @@ io.on("connection", (socket) => {
       });
       console.error("[DISCONNECT] Error handling disconnect:", error.message);
     }
+  });
+
+  // ===== END ROOM (HOST) EVENT =====
+  /**
+   * Handler for 'end_room' event.
+   * Broadcasts a room termination to all participants and forces them to leave.
+   * Intended to be emitted by the host when finalizing the meeting.
+   *
+   * @event end_room
+   * @emits room_ended - Notifies room members that the meeting has been ended
+   */
+  socket.on("end_room", async () => {
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    console.log(`[ROOM] 🔚 Ending room ${roomId} by ${socket.data.userId}`);
+    // Notify all users
+    io.to(roomId).emit("room_ended", {
+      success: true,
+      roomId,
+      message: "La reunión ha sido finalizada por el anfitrión",
+    });
+    // Make all sockets leave the room
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (room) {
+      for (const socketId of room) {
+        const clientSocket = io.sockets.sockets.get(socketId);
+        if (clientSocket) {
+          clientSocket.leave(roomId);
+        }
+      }
+    }
+    console.log(`[ROOM] ✅ Room ${roomId} ended and sockets left`);
   });
 });
 

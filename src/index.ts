@@ -257,11 +257,48 @@ async function emitRoomUsersState(roomId: string) {
   const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
   const sockets = await io.in(roomId).fetchSockets();
 
-  const users = sockets.map((s) => ({
-    userId: s.data.userId ?? s.data.user?.id,
-    email: s.data.user?.email,
-    roomId: s.data.roomId,
-  }));
+  // Fetch complete user data from Firebase for each connected socket
+  const usersPromises = sockets.map(async (s) => {
+    const userId = s.data.userId ?? s.data.user?.id;
+    
+    if (!userId) {
+      return {
+        userId: null,
+        email: s.data.user?.email,
+        roomId: s.data.roomId,
+        user: null,
+      };
+    }
+
+    try {
+      // Get complete user data from Firebase
+      const userDoc = await db.collection("users").doc(userId).get();
+      const userData = userDoc.exists ? userDoc.data() : null;
+
+      return {
+        userId,
+        email: s.data.user?.email,
+        roomId: s.data.roomId,
+        user: userData ? {
+          id: userId,
+          email: userData.email || s.data.user?.email,
+          displayName: userData.displayName || userData.nickname || userData.email?.split('@')[0],
+          nickname: userData.nickname,
+          photoURL: userData.photoURL,
+        } : null,
+      };
+    } catch (error) {
+      console.error(`[EMIT_USERS] Error fetching user data for ${userId}:`, error);
+      return {
+        userId,
+        email: s.data.user?.email,
+        roomId: s.data.roomId,
+        user: null,
+      };
+    }
+  });
+
+  const users = await Promise.all(usersPromises);
 
   io.to(roomId).emit("number_usersOnline", count);
   io.to(roomId).emit("usersOnline", users);

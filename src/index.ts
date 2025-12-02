@@ -732,8 +732,10 @@ io.on("connection", (socket) => {
         userData?.displayName ||
         userData?.nickname ||
         userData?.email?.split("@")[0] ||
+        // Fallback when Firestore user doc doesn't exist (e.g. OAuth‑only users)
+        socket.data.user?.email?.split("@")[0] ||
         "Usuario",
-      nickname: userData?.nickname || null,
+      nickname: userData?.nickname || socket.data.user?.nickname || null,
     };
 
     console.log(

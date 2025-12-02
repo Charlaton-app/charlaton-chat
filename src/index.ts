@@ -254,54 +254,87 @@ io.use(async (socket, next) => {
  * @returns {Promise<void>}
  */
 async function emitRoomUsersState(roomId: string) {
+  console.log(`[EMIT_USERS] Starting to emit room state for ${roomId}`);
+  
   const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
   const sockets = await io.in(roomId).fetchSockets();
 
+  console.log(`[EMIT_USERS] Room ${roomId} has ${count} sockets, fetching ${sockets.length} socket details`);
+
   // Fetch complete user data from Firebase for each connected socket
   const usersPromises = sockets.map(async (s) => {
-    const userId = s.data.userId ?? s.data.user?.id;
+    const userId = String(s.data.userId ?? s.data.user?.id);
     
-    if (!userId) {
-      return {
-        userId: null,
-        email: s.data.user?.email,
-        roomId: s.data.roomId,
-        user: null,
-      };
+    if (!userId || userId === 'undefined' || userId === 'null') {
+      console.error(`[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`, {
+        userId: s.data.userId,
+        user: s.data.user,
+        roomId: s.data.roomId
+      });
+      return null; // Return null for invalid users
     }
+
+    console.log(`[EMIT_USERS] 🔍 Fetching Firebase data for userId: ${userId}`);
 
     try {
       // Get complete user data from Firebase
       const userDoc = await db.collection("users").doc(userId).get();
+      
+      if (!userDoc.exists) {
+        console.warn(`[EMIT_USERS] ⚠️ User document not found in Firebase for ${userId}`);
+      }
+      
       const userData = userDoc.exists ? userDoc.data() : null;
 
-      return {
+      const userInfo = {
         userId,
-        email: s.data.user?.email,
-        roomId: s.data.roomId,
+        email: userData?.email || s.data.user?.email,
+        roomId: s.data.roomId || roomId,
         user: userData ? {
           id: userId,
           email: userData.email || s.data.user?.email,
           displayName: userData.displayName || userData.nickname || userData.email?.split('@')[0],
           nickname: userData.nickname,
           photoURL: userData.photoURL,
-        } : null,
+        } : {
+          id: userId,
+          email: s.data.user?.email,
+          displayName: s.data.user?.email?.split('@')[0] || 'Usuario',
+          nickname: null,
+          photoURL: null,
+        },
       };
+
+      console.log(`[EMIT_USERS] ✅ User data prepared for ${userId}:`, userInfo.user?.displayName);
+      return userInfo;
     } catch (error) {
-      console.error(`[EMIT_USERS] Error fetching user data for ${userId}:`, error);
+      console.error(`[EMIT_USERS] ❌ Error fetching user data for ${userId}:`, error);
       return {
         userId,
         email: s.data.user?.email,
-        roomId: s.data.roomId,
-        user: null,
+        roomId: s.data.roomId || roomId,
+        user: {
+          id: userId,
+          email: s.data.user?.email,
+          displayName: 'Usuario',
+          nickname: null,
+          photoURL: null,
+        },
       };
     }
   });
 
-  const users = await Promise.all(usersPromises);
+  const allUsers = await Promise.all(usersPromises);
+  
+  // Filter out null entries (invalid users)
+  const users = allUsers.filter((u) => u !== null);
+  
+  console.log(`[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${allUsers.length} total)`);
 
-  io.to(roomId).emit("number_usersOnline", count);
+  io.to(roomId).emit("number_usersOnline", users.length);
   io.to(roomId).emit("usersOnline", users);
+  
+  console.log(`[EMIT_USERS] ✅ Room state emitted for ${roomId}`);
 }
 
 // ===== Socket.IO Connection Handler =====
@@ -339,10 +372,11 @@ io.on("connection", (socket) => {
   socket.on("join_room", async (roomId: string) => {
     try {
       console.log(
-        `[ROOM] 👤 User ${user.email} attempting to join room ${roomId}`
+        `[ROOM] 👤 User ${user.email} (${user.id}) attempting to join room ${roomId}`
       );
 
       if (!roomId) {
+        console.error(`[ROOM] ❌ Invalid room ID for user ${user.email}`);
         socket.emit("join_room_error", {
           success: false,
           message: "Invalid room ID",
@@ -351,13 +385,26 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("usuario intenta entrar...");
+      // Ensure userId is consistently set as string
+      const userId = String(socket.data.userId || user.id);
+      console.log(`[ROOM] 🔑 Using userId: ${userId}`);
 
-      const userId = socket.data.userId || user.id;
-      socket.data.roomId = roomId;
-
+      // Check if room exists
       const roomSnap = await db.collection("rooms").doc(roomId).get();
-      const isPrivate = roomSnap.data()?.isPrivate;
+      
+      if (!roomSnap.exists) {
+        console.error(`[ROOM] ❌ Room ${roomId} does not exist`);
+        socket.emit("join_room_error", {
+          success: false,
+          message: "Room does not exist",
+          user: user,
+        });
+        return;
+      }
+
+      const roomData = roomSnap.data();
+      const isPrivate = roomData?.isPrivate || roomData?.private || false;
+      console.log(`[ROOM] 🔒 Room ${roomId} is ${isPrivate ? 'PRIVATE' : 'PUBLIC'}`);
 
       /**
        * Handles the actual joining logic for a room.
@@ -366,11 +413,19 @@ io.on("connection", (socket) => {
        * @returns {Promise<boolean>} True if join was successful, false otherwise
        */
       async function handleJoin() {
+        // Set room data BEFORE creating connection
         socket.data.roomId = roomId;
+        socket.data.userId = userId;
+        
+        console.log(`[ROOM] 🚪 Joining socket to room ${roomId}`);
         socket.join(roomId);
 
+        // Create connection in Firestore with userId as string
+        console.log(`[ROOM] 💾 Creating Firestore connection for userId: ${userId}`);
         const connectionSnap = await createConnection(userId, roomId);
+        
         if (!connectionSnap.success) {
+          console.error(`[ROOM] ❌ Failed to create connection for ${userId}`);
           socket.emit("join_room_error", {
             user: socket.data.user,
             message: "error al crear conexión",
@@ -379,49 +434,60 @@ io.on("connection", (socket) => {
           return false;
         }
 
+        console.log(`[ROOM] ✅ Connection created successfully for ${userId}`);
+
+        // Emit success ONLY to the joining user (not to room)
         socket.emit("join_room_success", {
           user: socket.data.user,
           message: "conectado correctamente",
           success: true,
-        });
-        socket.to(roomId).emit("join_room_success", {
-          user: socket.data.user,
-          message: "acceso exitoso",
-          success: true,
+          roomId: roomId,
         });
 
+        // Notify OTHER users in room about new join (not the joining user)
+        socket.to(roomId).emit("user_joined", {
+          user: {
+            id: userId,
+            email: socket.data.user.email,
+          },
+          message: `${socket.data.user.email} se unió a la reunión`,
+          roomId: roomId,
+        });
+
+        console.log(`[ROOM] 📢 Emitting room state to all users in ${roomId}`);
         await emitRoomUsersState(roomId);
+        
         return true;
       }
 
+      // Handle public vs private room logic
       if (!isPrivate) {
+        console.log(`[ROOM] 🌐 Public room - allowing join`);
         await handleJoin();
-        await emitRoomUsersState(roomId);
       } else {
+        console.log(`[ROOM] 🔐 Private room - checking access permissions`);
         const accessSnap = await getRoomAccessForUser(userId, roomId);
 
         if (!accessSnap.success) {
+          console.error(`[ROOM] ❌ User ${userId} has no access to private room ${roomId}`);
           socket.emit("join_room_error", {
             user: user,
-            message: "usuario sin permisos",
+            message: "usuario sin permisos para sala privada",
             success: false,
           });
 
-          console.log("Usuario sin permiso...");
-
           socket.disconnect(true);
-
           return;
         }
 
+        console.log(`[ROOM] ✅ Access granted for private room`);
         await handleJoin();
-        await emitRoomUsersState(roomId);
       }
     } catch (error) {
-      console.error("join_room error:", error);
+      console.error(`[ROOM] ❌ Error in join_room for ${user.email}:`, error);
       socket.emit("join_room_error", {
         user,
-        message: "Error interno",
+        message: "Error interno del servidor",
         success: false,
       });
       socket.disconnect(true);

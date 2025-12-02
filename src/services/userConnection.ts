@@ -59,18 +59,24 @@ export const getConnectionsByRoom = async (roomId: any) => {
  */
 export const createConnection = async (userId: any, roomId: any) => {
   try {
-    // Buscar conexión anterior
+    const userIdStr = String(userId);
+    console.log(`[CREATE_CONNECTION] Creating connection for userId: ${userIdStr}, roomId: ${roomId}`);
+
+    // Buscar conexión anterior - usar string para match con Firebase UIDs
     const snap = await ROOMS.doc(String(roomId))
       .collection(CON_COLECTION)
-      .where("userId", "==", Number(userId))
+      .where("userId", "==", userIdStr)
       .where("leftAt", "==", null)
       .get();
 
     if (!snap.empty) {
       // Refrescar conexión existente
       const id = snap.docs[0].id;
+      console.log(`[CREATE_CONNECTION] Refreshing existing connection ${id}`);
 
       const updated = {
+        userId: userIdStr,
+        roomId: String(roomId),
         joinedAt: new Date().toISOString(),
         leftAt: null,
       };
@@ -80,22 +86,27 @@ export const createConnection = async (userId: any, roomId: any) => {
         .doc(id)
         .update(updated);
 
+      console.log(`[CREATE_CONNECTION] ✅ Connection refreshed for ${userIdStr}`);
       return { user: userId, connection: updated, success: true };
     }
 
     // Crear nueva conexión
     const ref = ROOMS.doc(String(roomId)).collection(CON_COLECTION).doc();
+    console.log(`[CREATE_CONNECTION] Creating new connection document ${ref.id}`);
 
     const newConn = {
-      userId: Number(userId),
+      userId: userIdStr,
+      roomId: String(roomId),
       joinedAt: new Date().toISOString(),
       leftAt: null,
     };
 
     await ref.set(newConn);
 
+    console.log(`[CREATE_CONNECTION] ✅ New connection created for ${userIdStr}`);
     return { user: userId, connection: newConn, success: true };
-  } catch {
+  } catch (error) {
+    console.error(`[CREATE_CONNECTION] ❌ Error creating connection for ${userId}:`, error);
     return { user: userId, connection: null, success: false };
   }
 };
@@ -116,13 +127,19 @@ export const createConnection = async (userId: any, roomId: any) => {
  */
 export const leftConnection = async (userId: any, roomId: any) => {
   try {
+    const userIdStr = String(userId);
+    console.log(`[LEFT_CONNECTION] User ${userIdStr} leaving room ${roomId}`);
+
     const snap = await ROOMS.doc(String(roomId))
       .collection(CON_COLECTION)
-      .where("userId", "==", Number(userId))
+      .where("userId", "==", userIdStr)
       .where("leftAt", "==", null)
       .get();
 
-    if (snap.empty) return { user: userId, connection: null, success: false };
+    if (snap.empty) {
+      console.warn(`[LEFT_CONNECTION] No active connection found for ${userIdStr} in room ${roomId}`);
+      return { user: userId, connection: null, success: false };
+    }
 
     const docId = snap.docs[0].id;
 
@@ -130,14 +147,16 @@ export const leftConnection = async (userId: any, roomId: any) => {
       leftAt: new Date().toISOString(),
     };
 
-    const update = await ROOMS.doc(String(roomId))
+    await ROOMS.doc(String(roomId))
       .collection(CON_COLECTION)
       .doc(docId)
       .update(updated);
 
-    return { user: userId, connection: update, success: true };
-  } catch {
-    return { user: userId, connection: null, success: true };
+    console.log(`[LEFT_CONNECTION] ✅ User ${userIdStr} successfully left room ${roomId}`);
+    return { user: userId, connection: updated, success: true };
+  } catch (error) {
+    console.error(`[LEFT_CONNECTION] ❌ Error for ${userId} leaving ${roomId}:`, error);
+    return { user: userId, connection: null, success: false };
   }
 };
 

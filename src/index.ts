@@ -260,95 +260,50 @@ async function emitRoomUsersState(roomId: string) {
   const sockets = await io.in(roomId).fetchSockets();
 
   console.log(
-    `[EMIT_USERS] Room ${roomId} has ${count} sockets, fetching ${sockets.length} socket details`
+    `[EMIT_USERS] Room ${roomId} has ${count} sockets, preparing user list from socket data`
   );
 
-  // Fetch complete user data from Firebase for each connected socket
-  const usersPromises = sockets.map(async (s) => {
-    const userId = String(s.data.userId ?? s.data.user?.id);
-
-    if (!userId || userId === "undefined" || userId === "null") {
-      console.error(
-        `[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`,
-        {
-          userId: s.data.userId,
-          user: s.data.user,
-          roomId: s.data.roomId,
-        }
-      );
-      return null; // Return null for invalid users
-    }
-
-    console.log(`[EMIT_USERS] 🔍 Fetching Firebase data for userId: ${userId}`);
-
-    try {
-      // Get complete user data from Firebase
-      const userDoc = await db.collection("users").doc(userId).get();
-
-      if (!userDoc.exists) {
-        console.warn(
-          `[EMIT_USERS] ⚠️ User document not found in Firebase for ${userId}`
+  const users = sockets
+    .map((s) => {
+      const userId = String(s.data.userId ?? s.data.user?.id);
+      if (!userId || userId === "undefined" || userId === "null") {
+        console.error(
+          `[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`,
+          {
+            userId: s.data.userId,
+            user: s.data.user,
+            roomId: s.data.roomId,
+          }
         );
+        return null;
       }
 
-      const userData = userDoc.exists ? userDoc.data() : null;
+      const socketUser: any = s.data.user || {};
+      const baseEmail: string = socketUser.email || "";
 
-      const userInfo = {
-        userId,
-        email: userData?.email || s.data.user?.email,
-        roomId: s.data.roomId || roomId,
-        user: userData
-          ? {
-              id: userId,
-              email: userData.email || s.data.user?.email,
-              displayName:
-                userData.displayName ||
-                userData.nickname ||
-                userData.email?.split("@")[0],
-              nickname: userData.nickname,
-              photoURL: userData.photoURL,
-            }
-          : {
-              id: userId,
-              email: s.data.user?.email,
-              displayName: s.data.user?.email?.split("@")[0] || "Usuario",
-              nickname: null,
-              photoURL: null,
-            },
+      const user = {
+        id: userId,
+        email: baseEmail,
+        displayName:
+          socketUser.displayName ||
+          socketUser.nickname ||
+          (baseEmail ? baseEmail.split("@")[0] : "") ||
+          "Usuario",
+        nickname: socketUser.nickname || null,
+        photoURL: socketUser.photoURL || null,
       };
 
-      console.log(
-        `[EMIT_USERS] ✅ User data prepared for ${userId}:`,
-        userInfo.user?.displayName
-      );
-      return userInfo;
-    } catch (error) {
-      console.error(
-        `[EMIT_USERS] ❌ Error fetching user data for ${userId}:`,
-        error
-      );
       return {
         userId,
-        email: s.data.user?.email,
+        email: user.email,
         roomId: s.data.roomId || roomId,
-        user: {
-          id: userId,
-          email: s.data.user?.email,
-          displayName: "Usuario",
-          nickname: null,
-          photoURL: null,
-        },
+        user,
       };
-    }
-  });
-
-  const allUsers = await Promise.all(usersPromises);
-
-  // Filter out null entries (invalid users)
-  const users = allUsers.filter((u) => u !== null);
+    })
+    .filter((u) => u !== null);
 
   console.log(
-    `[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${allUsers.length} total)`
+    `[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${sockets.length} total)`
   );
 
   io.to(roomId).emit("number_usersOnline", users.length);
@@ -721,21 +676,19 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Get user data from Firebase for complete message info
-    const userDoc = await db.collection("users").doc(userId).get();
-    const userData = userDoc.exists ? userDoc.data() : null;
+    // Build user info without extra Firestore reads – rely on JWT / socket data.
+    const socketUser: any = socket.data.user || {};
+    const baseEmail: string = socketUser.email || "";
 
     const userInfo = {
       id: userId,
-      email: userData?.email || socket.data.user?.email || "",
+      email: baseEmail,
       displayName:
-        userData?.displayName ||
-        userData?.nickname ||
-        userData?.email?.split("@")[0] ||
-        // Fallback when Firestore user doc doesn't exist (e.g. OAuth‑only users)
-        socket.data.user?.email?.split("@")[0] ||
+        socketUser.displayName ||
+        socketUser.nickname ||
+        (baseEmail ? baseEmail.split("@")[0] : "") ||
         "Usuario",
-      nickname: userData?.nickname || socket.data.user?.nickname || null,
+      nickname: socketUser.nickname || null,
     };
 
     console.log(

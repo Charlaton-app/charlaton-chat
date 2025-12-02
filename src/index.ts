@@ -758,7 +758,7 @@ io.on("connection", (socket) => {
     }
 
     const messagePayload = {
-      id: message.message.id,
+      id: message.message?.id,
       content: msg,
       userId: userId,
       roomId: roomId,

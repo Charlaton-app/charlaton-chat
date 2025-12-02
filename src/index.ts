@@ -728,11 +728,17 @@ io.on("connection", (socket) => {
     const userInfo = {
       id: userId,
       email: userData?.email || socket.data.user?.email || "",
-      displayName: userData?.displayName || userData?.nickname || userData?.email?.split("@")[0] || "Usuario",
+      displayName:
+        userData?.displayName ||
+        userData?.nickname ||
+        userData?.email?.split("@")[0] ||
+        "Usuario",
       nickname: userData?.nickname || null,
     };
 
-    console.log(`[MESSAGE] User ${userId} (${userInfo.displayName}) sending message`);
+    console.log(
+      `[MESSAGE] User ${userId} (${userInfo.displayName}) sending message`
+    );
 
     const data = {
       userId: userId,
@@ -779,7 +785,9 @@ io.on("connection", (socket) => {
           clientSocket.emit("message_success", messagePayload);
         }
       }
-      console.log(`[MESSAGE] Private message sent to ${target.length} recipients`);
+      console.log(
+        `[MESSAGE] Private message sent to ${target.length} recipients`
+      );
     }
   });
 
@@ -800,7 +808,9 @@ io.on("connection", (socket) => {
 
     if (!roomId || !userId) return;
 
-    console.log(`[MEDIA] User ${userId} changed media state: mic=${micEnabled}, camera=${cameraEnabled}`);
+    console.log(
+      `[MEDIA] User ${userId} changed media state: mic=${micEnabled}, camera=${cameraEnabled}`
+    );
 
     // Broadcast to all other users in room
     socket.to(roomId).emit("user_media_changed", {

@@ -16,8 +16,22 @@
  */
 export interface OnlineUser {
   socketId: string;
-  userId: string;
   roomId: string;
+  userId: string;
+  joinedAt: FirebaseFirestore.Timestamp | number;
+  leftAt: FirebaseFirestore.Timestamp | number;
+}
+
+/**
+ * 
+ * 
+ */
+
+export interface storedOnlineUser {
+  roomId: string;
+  userId: string;
+  joinedAt: FirebaseFirestore.Timestamp | number;
+  leftAt: FirebaseFirestore.Timestamp | number;
 }
 
 /**
@@ -41,11 +55,22 @@ export interface JWTUser {
  * the database) or a numeric epoch (when coming directly from Socket.IO).
  */
 export interface Message {
-  senderId: string;
-  roomId: string;
-  text: string;
-  createAt: FirebaseFirestore.Timestamp | number;
+  senderId: string; // this field is for identificate the user who send de message
+  roomId: string; // the room where the message is will be publicate
+  text: string; // the content of the message
+  target: UserTargeted[]; // the users who will get the message
+  visibility: number; // number that identify if the message is public or private ( at moment )
+  createAt: FirebaseFirestore.Timestamp | number; // for order the message 
 }
+
+/** 
+ *  User targeted for send a private message 
+ * 
+ * 
+*/
+export interface UserTargeted {
+  userId: String;
+};
 
 /**
  * Message record as stored/read from Firestore.
@@ -71,16 +96,17 @@ export interface SendMessagePayload {
 /**
  * Payload delivered by the server when broadcasting a new message.
  *
- * It extends the base `Message` type and may optionally include the
+ * It extends the base `Message` type and include the
  * persisted `id` and a small user descriptor used by the UI.
  */
 export interface ReceiveMessagePayload extends Message {
-  id?: string;
-  user?: {
+  id: string;
+  user: {
     id: string;
     email: string;
-    nickname?: string;
-    displayName?: string;
+    name: string;
+    last_name?: string;
+    birth_date?: FirebaseFirestore.Timestamp | number;
   };
 }
 

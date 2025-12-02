@@ -5,7 +5,7 @@
 
 import express from "express";
 import { createServer } from "http";
-import { Server, Socket } from "socket.io";
+import { Server } from "socket.io";
 import cors from "cors";
 import jwt from "jsonwebtoken";
 import "dotenv/config";
@@ -13,15 +13,16 @@ import "dotenv/config";
 // Import Firebase configuration
 import { db } from "./config/firebase";
 
-// Import services
-import { saveMessage, getRoomMessages } from "./services/messageService";
 import {
-  addUserConnection,
-  removeUserConnection,
-  getUsersInRoom,
-  getAllOnlineUsers,
-  getOnlineUserCount,
-} from "./services/connectionService";
+  getRoomAccessForUser,
+  createRoomAccess,
+} from "./services/roomAcessService";
+
+import { createConnection, leftConnection } from "./services/userConnection";
+
+import { createMessage, sendMessageTo } from "./services/messageService";
+
+import { getAdminsInRoom, existsAdmin } from "./services/roomService";
 
 // Import types
 import type {
@@ -32,6 +33,7 @@ import type {
   SendMessagePayload,
   Message,
 } from "./types";
+import { Socket } from "dgram";
 
 // ===== Initialize Express App =====
 /**
@@ -48,7 +50,10 @@ const httpServer = createServer(app);
 
 // ===== Parse Environment Variables =====
 const PORT = Number(process.env.PORT) || 4000;
-const ACCESS_SECRET = process.env.ACCESS_SECRET || process.env.JWT_SECRET || "default-secret-change-me";
+const ACCESS_SECRET =
+  process.env.ACCESS_SECRET ||
+  process.env.JWT_SECRET ||
+  "default-secret-change-me";
 
 /**
  * Build the list of allowed CORS origins for both Express and Socket.IO.
@@ -103,7 +108,10 @@ app.use(
       }
 
       // Allow all origins in development if none configured
-      if (allowedOrigins.length === 0 && process.env.NODE_ENV !== "production") {
+      if (
+        allowedOrigins.length === 0 &&
+        process.env.NODE_ENV !== "production"
+      ) {
         return callback(null, true);
       }
 
@@ -127,15 +135,12 @@ app.use(express.json());
  * - Auth is handled in the `io.use` middleware below.
  * - CORS configuration is shared with the Express app.
  */
-const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData>(
-  httpServer,
-  {
-    cors: {
-      origin: allowedOrigins.length > 0 ? allowedOrigins : "*",
-      credentials: true,
-    },
-  }
-);
+const io = new Server(httpServer, {
+  cors: {
+    origin: allowedOrigins.length > 0 ? allowedOrigins : "*",
+    credentials: true,
+  },
+});
 
 // ===== HTTP REST Endpoints =====
 
@@ -145,12 +150,12 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData
  * Returns a small JSON payload with service metadata and the
  * number of users currently tracked as online.
  */
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     status: "online",
     service: "Charlaton Chat Microservice",
     message: "WebSocket chat server is running",
-    onlineUsers: getOnlineUserCount(),
+    onlineUsers: io.engine.clientsCount,
     version: "1.0.0",
   });
 });
@@ -169,84 +174,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-/**
- * REST endpoint to fetch recent messages for a given room.
- *
- * Path params:
- * - `roomId`: Room identifier.
- *
- * Query params:
- * - `limit` (optional): Max number of messages to return (default: 100).
- *
- * The data comes from Firestore via `getRoomMessages` service.
- */
-app.get("/api/messages/:roomId", async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    const limit = parseInt(req.query.limit as string) || 100;
-
-    if (!roomId) {
-      return res.status(400).json({
-        success: false,
-        error: "roomId is required",
-      });
-    }
-
-    const messages = await getRoomMessages(roomId, limit);
-
-    res.json({
-      success: true,
-      roomId,
-      count: messages.length,
-      messages,
-    });
-  } catch (error: any) {
-    console.error("[API] ❌ Error fetching messages:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch messages",
-      details: process.env.NODE_ENV === "development" ? error.message : undefined,
-    });
-  }
-});
-
-/**
- * REST endpoint to list online users in a specific room.
- *
- * Path params:
- * - `roomId`: Room identifier.
- *
- * The data is served from an in‑memory registry maintained by
- * the `connectionService`.
- */
-app.get("/api/users/online/:roomId", (req, res) => {
-  try {
-    const { roomId } = req.params;
-    
-    if (!roomId) {
-      return res.status(400).json({
-        success: false,
-        error: "roomId is required",
-      });
-    }
-
-    const users = getUsersInRoom(roomId);
-    
-    res.json({
-      success: true,
-      roomId,
-      count: users.length,
-      users,
-    });
-  } catch (error: any) {
-    console.error("[API] ❌ Error fetching online users:", error.message);
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch online users",
-    });
-  }
-});
-
 // ===== Socket.IO Authentication Middleware =====
 /**
  * Socket.IO middleware that authenticates every incoming connection.
@@ -259,54 +186,131 @@ app.get("/api/users/online/:roomId", (req, res) => {
  * On success, a lightweight `JWTUser` is attached to `socket.data`.
  * On failure, the connection is rejected with an authentication error.
  */
-io.use(async (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>, next) => {
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
 
     if (!token) {
-      console.warn(`[AUTH] ⚠️ Connection attempt without token from ${socket.id}`);
+      console.warn(`[AUTH] Connection attempt without token from ${socket.id}`);
       return next(new Error("Authentication token required"));
     }
 
     // Try to verify as backend JWT first
     try {
       const decoded = jwt.verify(token, ACCESS_SECRET) as JWTUser;
-      
+
       // Store user data in socket
       socket.data.user = decoded;
       socket.data.userId = decoded.id;
-      
-      console.log(`[AUTH] ✅ Backend JWT verified for user ${decoded.email} (${decoded.id})`);
+
+      console.log(
+        `[AUTH] Backend JWT verified for user ${decoded.email} (${decoded.id})`
+      );
       return next();
     } catch (backendJWTError: any) {
-      console.log(`[AUTH] ⚠️ Backend JWT verification failed, trying Firebase token...`);
-      
+      console.log(
+        `[AUTH] Backend JWT verification failed, trying Firebase token...`
+      );
+
       // If backend JWT fails, try Firebase ID Token
       try {
         const admin = (await import("./config/firebase")).default;
         const decodedFirebaseToken = await admin.auth().verifyIdToken(token);
-        
+
         // Store user data from Firebase token
         socket.data.user = {
           id: decodedFirebaseToken.uid,
           email: decodedFirebaseToken.email || "",
         };
         socket.data.userId = decodedFirebaseToken.uid;
-        
-        console.log(`[AUTH] ✅ Firebase token verified for user ${decodedFirebaseToken.email} (${decodedFirebaseToken.uid})`);
+
+        console.log(
+          `[AUTH] Firebase token verified for user ${decodedFirebaseToken.email} (${decodedFirebaseToken.uid})`
+        );
         return next();
       } catch (firebaseError: any) {
-        console.error(`[AUTH] ❌ Both JWT and Firebase token verification failed from ${socket.id}`);
+        console.error(
+          `[AUTH] Both JWT and Firebase token verification failed from ${socket.id}`
+        );
         console.error(`[AUTH] Backend JWT error: ${backendJWTError.message}`);
         console.error(`[AUTH] Firebase error: ${firebaseError.message}`);
         return next(new Error("Invalid authentication token"));
       }
     }
   } catch (err: any) {
-    console.error(`[AUTH] ❌ Authentication error from ${socket.id}:`, err.message);
+    console.error(
+      `[AUTH] Authentication error from ${socket.id}:`,
+      err.message
+    );
     return next(new Error("Authentication error"));
   }
 });
+
+/**
+ * Emits the current state of users in a room to all connected clients.
+ * Sends both the count of online users and detailed user information.
+ *
+ * @param {string} roomId - The ID of the room to emit state for
+ * @returns {Promise<void>}
+ */
+async function emitRoomUsersState(roomId: string) {
+  console.log(`[EMIT_USERS] Starting to emit room state for ${roomId}`);
+
+  const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+  const sockets = await io.in(roomId).fetchSockets();
+
+  console.log(
+    `[EMIT_USERS] Room ${roomId} has ${count} sockets, preparing user list from socket data`
+  );
+
+  const users = sockets
+    .map((s) => {
+      const userId = String(s.data.userId ?? s.data.user?.id);
+      if (!userId || userId === "undefined" || userId === "null") {
+        console.error(
+          `[EMIT_USERS] ❌ Socket ${s.id} has no valid userId. Socket data:`,
+          {
+            userId: s.data.userId,
+            user: s.data.user,
+            roomId: s.data.roomId,
+          }
+        );
+        return null;
+      }
+
+      const socketUser: any = s.data.user || {};
+      const baseEmail: string = socketUser.email || "";
+
+      const user = {
+        id: userId,
+        email: baseEmail,
+        displayName:
+          socketUser.displayName ||
+          socketUser.nickname ||
+          (baseEmail ? baseEmail.split("@")[0] : "") ||
+          "Usuario",
+        nickname: socketUser.nickname || null,
+        photoURL: socketUser.photoURL || null,
+      };
+
+      return {
+        userId,
+        email: user.email,
+        roomId: s.data.roomId || roomId,
+        user,
+      };
+    })
+    .filter((u) => u !== null);
+
+  console.log(
+    `[EMIT_USERS] 📤 Emitting ${users.length} valid users (filtered from ${sockets.length} total)`
+  );
+
+  io.to(roomId).emit("number_usersOnline", users.length);
+  io.to(roomId).emit("usersOnline", users);
+
+  console.log(`[EMIT_USERS] ✅ Room state emitted for ${roomId}`);
+}
 
 // ===== Socket.IO Connection Handler =====
 /**
@@ -318,206 +322,677 @@ io.use(async (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, Soc
  * - Persisting and broadcasting chat messages.
  * - Cleaning up in‑memory connections on disconnect.
  */
-io.on("connection", (socket: Socket<ClientToServerEvents, ServerToClientEvents, {}, SocketData>) => {
-  console.log(`[CONNECTION] 🟢 New connection: ${socket.id}`);
-  
-  const user = socket.data.user;
-  
+io.on("connection", (socket) => {
+  console.log(`[CONNECTION] New connection: ${socket.id}`);
+
+  const user = socket.data.user!;
+
   if (!user) {
-    console.error("[CONNECTION] ❌ No user data found in socket, disconnecting");
+    console.error("[CONNECTION] No user data found in socket, disconnecting");
     socket.disconnect(true);
     return;
   }
 
   // ===== JOIN ROOM EVENT =====
+  /**
+   * Handler for 'join_room' event.
+   * Validates room access permissions and creates user connection in the room.
+   * For private rooms, checks if user has been granted access.
+   *
+   * @event join_room
+   * @param {string} roomId - The ID of the room to join
+   * @emits join_room_success - When user successfully joins the room
+   * @emits join_room_error - When user cannot join (invalid room, no permissions, etc.)
+   */
   socket.on("join_room", async (roomId: string) => {
     try {
-      console.log(`[ROOM] 👤 User ${user.email} attempting to join room ${roomId}`);
+      console.log(
+        `[ROOM] 👤 User ${user.email} (${user.id}) attempting to join room ${roomId}`
+      );
 
-      if (!roomId || roomId.trim() === "") {
+      if (!roomId) {
+        console.error(`[ROOM] ❌ Invalid room ID for user ${user.email}`);
         socket.emit("join_room_error", {
           success: false,
           message: "Invalid room ID",
-          user,
+          user: user,
         });
         return;
       }
 
-      const userId = socket.data.userId || user.id;
-      socket.data.roomId = roomId;
+      // Ensure userId is consistently set as string
+      const userId = String(socket.data.userId || user.id);
+      console.log(`[ROOM] 🔑 Using userId: ${userId}`);
 
-      // Join the Socket.IO room
-      socket.join(roomId);
+      // Check if room exists
+      const roomSnap = await db.collection("rooms").doc(roomId).get();
 
-      // Track user connection
-      addUserConnection(socket.id, userId, roomId);
+      if (!roomSnap.exists) {
+        console.error(`[ROOM] ❌ Room ${roomId} does not exist`);
+        socket.emit("join_room_error", {
+          success: false,
+          message: "Room does not exist",
+          user: user,
+        });
+        return;
+      }
 
-      console.log(`[ROOM] ✅ User ${user.email} joined room ${roomId}`);
+      const roomData = roomSnap.data();
+      const isPrivate = roomData?.isPrivate || roomData?.private || false;
+      console.log(
+        `[ROOM] 🔒 Room ${roomId} is ${isPrivate ? "PRIVATE" : "PUBLIC"}`
+      );
 
-      // Notify the user
-      socket.emit("join_room_success", {
-        success: true,
-        message: "Successfully joined room",
-        user,
-      });
+      /**
+       * Handles the actual joining logic for a room.
+       * Creates connection, joins socket room, and emits success events.
+       *
+       * @returns {Promise<boolean>} True if join was successful, false otherwise
+       */
+      async function handleJoin() {
+        // Set room data BEFORE creating connection
+        socket.data.roomId = roomId;
+        socket.data.userId = userId;
 
-      // Notify others in the room
-      socket.to(roomId).emit("join_room_success", {
-        success: true,
-        message: `${user.email} joined the room`,
-        user,
-      });
+        console.log(`[ROOM] 🚪 Joining socket to room ${roomId}`);
+        socket.join(roomId);
 
-      // Broadcast updated online users list for this room
-      const roomUsers = getUsersInRoom(roomId);
-      io.to(roomId).emit("usersOnline", roomUsers);
-    } catch (error: any) {
-      console.error("[ROOM] ❌ Error joining room:", error.message);
+        // Create connection in Firestore with userId as string
+        console.log(
+          `[ROOM] 💾 Creating Firestore connection for userId: ${userId}`
+        );
+        const connectionSnap = await createConnection(userId, roomId);
+
+        if (!connectionSnap.success) {
+          console.error(`[ROOM] ❌ Failed to create connection for ${userId}`);
+          socket.emit("join_room_error", {
+            user: socket.data.user,
+            message: "error al crear conexión",
+            success: false,
+          });
+          return false;
+        }
+
+        console.log(`[ROOM] ✅ Connection created successfully for ${userId}`);
+
+        // Emit success ONLY to the joining user (not to room)
+        socket.emit("join_room_success", {
+          user: socket.data.user,
+          message: "conectado correctamente",
+          success: true,
+          roomId: roomId,
+        });
+
+        // Notify OTHER users in room about new join (not the joining user)
+        socket.to(roomId).emit("user_joined", {
+          user: {
+            id: userId,
+            email: socket.data.user.email,
+          },
+          message: `${socket.data.user.email} se unió a la reunión`,
+          roomId: roomId,
+        });
+
+        console.log(`[ROOM] 📢 Emitting room state to all users in ${roomId}`);
+        await emitRoomUsersState(roomId);
+
+        return true;
+      }
+
+      // Handle public vs private room logic
+      if (!isPrivate) {
+        console.log(`[ROOM] 🌐 Public room - allowing join`);
+        await handleJoin();
+      } else {
+        console.log(`[ROOM] 🔐 Private room - checking access permissions`);
+        const accessSnap = await getRoomAccessForUser(userId, roomId);
+
+        if (!accessSnap.success) {
+          console.error(
+            `[ROOM] ❌ User ${userId} has no access to private room ${roomId}`
+          );
+          socket.emit("join_room_error", {
+            user: user,
+            message: "usuario sin permisos para sala privada",
+            success: false,
+          });
+
+          socket.disconnect(true);
+          return;
+        }
+
+        console.log(`[ROOM] ✅ Access granted for private room`);
+        await handleJoin();
+      }
+    } catch (error) {
+      console.error(`[ROOM] ❌ Error in join_room for ${user.email}:`, error);
       socket.emit("join_room_error", {
-        success: false,
-        message: "Failed to join room",
         user,
+        message: "Error interno del servidor",
+        success: false,
       });
+      socket.disconnect(true);
+    }
+  });
+
+  // ===== JOINS_IN_ROOM EVENT =====
+  /**
+   * Handler for 'joins_in_room' event.
+   * Returns a list of all user IDs currently connected to a specific room.
+   *
+   * @event joins_in_room
+   * @param {string} roomId - The ID of the room to query
+   * @emits room_users - Array of user IDs in the room
+   * @emits joins_in_room_error - When the room has no users or doesn't exist
+   */
+  socket.on("joins_in_room", async (roomId: string) => {
+    const socketsInRoom = io.sockets.adapter.rooms.get(roomId);
+    const userId = socket.data.userId;
+
+    if (!socketsInRoom) {
+      socket.emit("joins_in_room_error", {
+        success: false,
+        message: `no hay usuarios en la sala ${roomId}`,
+        userId: userId,
+      });
+      return;
+    }
+
+    const users: string[] = [];
+
+    for (const socketId of socketsInRoom) {
+      const s = io.sockets.sockets.get(socketId);
+      const userId = s?.data.userId;
+      if (s && userId) {
+        users.push(userId);
+      }
+    }
+
+    socket.emit("room_users", users);
+  });
+
+  // ===== JOINS EVENT =====
+  /**
+   * Handler for 'joins' event.
+   * Returns a list of all users currently connected to the server across all rooms.
+   *
+   * @event joins
+   * @emits joins_users - Array of all connected user objects
+   */
+  socket.on("joins", async () => {
+    const users = [];
+
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.data.user) {
+        users.push(socket.data.user);
+      }
+    }
+
+    socket.emit("joins_users", users);
+  });
+
+  // ===== WebRTC SIGNALS =====
+  /**
+   * Handler for 'webrtc_offer' event.
+   * Forwards a WebRTC offer from one user to a specific target user in the same room.
+   *
+   * @event webrtc_offer
+   * @param {Object} payload - The offer payload
+   * @param {string} payload.roomId - The room ID where users are connected
+   * @param {string} payload.targetUserId - The ID of the user to receive the offer
+   * @param {RTCSessionDescriptionInit} payload.sdp - The WebRTC session description
+   * @emits webrtc_offer - Forwards the offer to the target user with sender ID
+   */
+  socket.on("webrtc_offer", ({ roomId, targetUserId, sdp }) => {
+    // Buscar socket del target en la sala
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_offer", {
+          senderId: socket.data.userId,
+          sdp,
+        });
+        break;
+      }
+    }
+  });
+
+  /**
+   * Handler for 'webrtc_answer' event.
+   * Forwards a WebRTC answer from one user to a specific target user in the same room.
+   *
+   * @event webrtc_answer
+   * @param {Object} payload - The answer payload
+   * @param {string} payload.roomId - The room ID where users are connected
+   * @param {string} payload.targetUserId - The ID of the user to receive the answer
+   * @param {RTCSessionDescriptionInit} payload.sdp - The WebRTC session description
+   * @emits webrtc_answer - Forwards the answer to the target user with sender ID
+   */
+  socket.on("webrtc_answer", ({ roomId, targetUserId, sdp }) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_answer", {
+          senderId: socket.data.userId,
+          sdp,
+        });
+        break;
+      }
+    }
+  });
+
+  /**
+   * Handler for 'webrtc_ice_candidate' event.
+   * Forwards ICE candidates from one user to a specific target user in the same room.
+   *
+   * @event webrtc_ice_candidate
+   * @param {Object} payload - The ICE candidate payload
+   * @param {string} payload.roomId - The room ID where users are connected
+   * @param {string} payload.targetUserId - The ID of the user to receive the candidate
+   * @param {RTCIceCandidate} payload.candidate - The ICE candidate information
+   * @emits webrtc_ice_candidate - Forwards the ICE candidate to the target user with sender ID
+   */
+  socket.on("webrtc_ice_candidate", ({ roomId, targetUserId, candidate }) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const sockId of room) {
+      const s = io.sockets.sockets.get(sockId);
+
+      if (s && s.data.userId === targetUserId) {
+        s.emit("webrtc_ice_candidate", {
+          senderId: socket.data.userId,
+          candidate,
+        });
+        break;
+      }
     }
   });
 
   // ===== SEND MESSAGE EVENT =====
-  socket.on("sendMessage", async (payload: SendMessagePayload) => {
-    try {
-      const { senderId, roomId, text } = payload;
+  /**
+   * Handler for 'message' event.
+   * Processes and broadcasts chat messages. Supports both public and private messages.
+   * Validates user connection, message content, and visibility settings.
+   *
+   * @event message
+   * @param {Object} payload - The message payload
+   * @param {string} payload.msg - The message content
+   * @param {('public'|'private')} payload.visibility - Message visibility type
+   * @param {Array<{userId: string}>} payload.target - Array of target users for private messages
+   * @emits message_success - When message is successfully sent
+   * @emits new_success - Broadcasts new public message to room
+   * @emits message_error - When message fails validation or sending
+   */
+  socket.on("message", async ({ msg, visibility, target }) => {
+    if (!socket.data.userId) return;
 
-      // Validate payload
-      if (!senderId || !roomId || !text || text.trim() === "") {
-        console.error("[MESSAGE] ❌ Invalid message payload:", payload);
-        return;
-      }
+    const userId = socket.data.userId;
+    const roomId = socket.data.roomId;
 
-      // Verify user is in the room
-      const userRoomId = socket.data.roomId;
-      if (userRoomId !== roomId) {
-        console.warn(`[MESSAGE] ⚠️ User ${senderId} trying to send to room ${roomId} but is in ${userRoomId}`);
-        return;
-      }
-
-      console.log(`[MESSAGE] 📤 From ${senderId} in room ${roomId}: "${text.substring(0, 50)}..."`);
-
-      // Get user information from Firestore
-      let userInfo: { id: string; email: string; nickname?: string; displayName?: string } | undefined;
-      try {
-        const userDoc = await db.collection("users").doc(senderId).get();
-        if (userDoc.exists) {
-          const userData = userDoc.data();
-          userInfo = {
-            id: senderId,
-            email: userData?.email || "",
-            nickname: userData?.nickname,
-            displayName: userData?.displayName,
-          };
-        }
-      } catch (userError) {
-        console.error(`[MESSAGE] ⚠️ Error fetching user info for ${senderId}:`, userError);
-      }
-
-      // Create message object
-      const message: Message = {
-        senderId,
-        roomId,
-        text,
-        createAt: Date.now(),
-      };
-
-      // Save message to Firestore
-      const messageId = await saveMessage(message);
-
-      // Broadcast message to all users in the room (including sender) with user info
-      io.to(roomId).emit("newMessage", {
-        ...message,
-        id: messageId,
-        user: userInfo, // Include user information
-      });
-
-      console.log(`[MESSAGE] ✅ Message broadcast to room ${roomId}`);
-    } catch (error: any) {
-      console.error("[MESSAGE] ❌ Error sending message:", error.message);
-      
-      // Send error notification only to sender
-      socket.emit("newMessage", {
-        senderId: "system",
-        roomId: socket.data.roomId || "",
-        text: "Error sending message. Please try again.",
-        createAt: Date.now(),
+    if (visibility !== "public" && visibility !== "private") {
+      return socket.emit("message_error", {
+        message: "visibility inválida",
+        success: false,
       });
     }
+
+    if (!msg || typeof msg !== "string") {
+      return socket.emit("message_error", {
+        message: "mensaje inválido",
+        success: false,
+      });
+    }
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    if (!socket.rooms.has(roomId)) {
+      return socket.emit("message_error", {
+        message: "No estás en la sala",
+        success: false,
+      });
+    }
+
+    const connection = await db
+      .collection("rooms")
+      .doc(roomId)
+      .collection("connections")
+      .where("userId", "==", userId)
+      .get();
+
+    if (connection.empty) {
+      socket.emit("message_error", {
+        message: "el usuario no tiene conexión activa en la sala",
+        success: false,
+      });
+
+      return;
+    }
+
+    // Build user info without extra Firestore reads – rely on JWT / socket data.
+    const socketUser: any = socket.data.user || {};
+    const baseEmail: string = socketUser.email || "";
+
+    const userInfo = {
+      id: userId,
+      email: baseEmail,
+      displayName:
+        socketUser.displayName ||
+        socketUser.nickname ||
+        (baseEmail ? baseEmail.split("@")[0] : "") ||
+        "Usuario",
+      nickname: socketUser.nickname || null,
+    };
+
+    console.log(
+      `[MESSAGE] User ${userId} (${userInfo.displayName}) sending message`
+    );
+
+    const data = {
+      userId: userId,
+      roomId: roomId,
+      content: msg,
+      visibility: visibility,
+      target: target,
+    };
+
+    const message = await createMessage(data);
+
+    if (!message.success) {
+      socket
+        .to(roomId)
+        .emit("message_error", { message: "error", success: false });
+      return;
+    }
+
+    const messagePayload = {
+      id: message.message?.id,
+      content: msg,
+      userId: userId,
+      roomId: roomId,
+      visibility: visibility,
+      createdAt: new Date().toISOString(),
+      user: userInfo,
+      success: true,
+    };
+
+    if (visibility === "public") {
+      // Send to sender with user info
+      socket.emit("message_success", messagePayload);
+      // Broadcast to others with user info
+      socket.to(roomId).emit("new_success", messagePayload);
+      console.log(`[MESSAGE] Public message broadcasted to room ${roomId}`);
+    }
+
+    if (visibility === "private") {
+      for (const socketId of room) {
+        const clientSocket = io.sockets.sockets.get(socketId);
+        if (!clientSocket) continue;
+
+        if (sendMessageTo(target, clientSocket.data.userId)) {
+          clientSocket.emit("message_success", messagePayload);
+        }
+      }
+      console.log(
+        `[MESSAGE] Private message sent to ${target.length} recipients`
+      );
+    }
+  });
+
+  // ===== MEDIA STATE CHANGE EVENTS =====
+  /**
+   * Handler for 'media_state_changed' event.
+   * Broadcasts microphone and camera state changes to all participants in the room.
+   *
+   * @event media_state_changed
+   * @param {Object} payload - The media state payload
+   * @param {boolean} payload.micEnabled - Whether microphone is enabled
+   * @param {boolean} payload.cameraEnabled - Whether camera is enabled
+   * @emits user_media_changed - Notifies other participants about media state changes
+   */
+  socket.on("media_state_changed", async ({ micEnabled, cameraEnabled }) => {
+    const roomId = socket.data.roomId;
+    const userId = socket.data.userId;
+
+    if (!roomId || !userId) return;
+
+    console.log(
+      `[MEDIA] User ${userId} changed media state: mic=${micEnabled}, camera=${cameraEnabled}`
+    );
+
+    // Broadcast to all other users in room
+    socket.to(roomId).emit("user_media_changed", {
+      userId,
+      micEnabled,
+      cameraEnabled,
+    });
+  });
+
+  // ===== SEND ACCESS EVENT ====
+  /**
+   * Handler for 'send_access' event.
+   * Sends an access request notification to all admins in a room.
+   * Used when a user wants to request access to a private room.
+   *
+   * @event send_access
+   * @param {string} roomId - The ID of the room to request access for
+   * @emits send_access - Notifies all admins about the access request
+   */
+  socket.on("send_access", async (roomId) => {
+    if (!roomId) return;
+    if (!socket.data.userId) return;
+
+    const userId = socket.data.userId;
+
+    const adminsId = await getAdminsInRoom(roomId);
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const socketId of room) {
+      const clientSocket = io.sockets.sockets.get(socketId);
+      if (!clientSocket) continue;
+
+      if (adminsId.includes(clientSocket.data.userId)) {
+        clientSocket.emit("send_access", {
+          userId,
+          roomId,
+          message: "El usuario solicita acceso",
+        });
+      }
+    }
+  });
+
+  // ===== GRANT ACCESS EVENT ====
+  /**
+   * Handler for 'grant_access' event.
+   * Allows room admins or creators to grant access to a user requesting entry to a private room.
+   * Validates that the granter is an admin or creator before creating the access permission.
+   *
+   * @event grant_access
+   * @param {Object} payload - The access grant payload
+   * @param {string} payload.roomId - The ID of the room to grant access for
+   * @param {string} payload.targetUserId - The ID of the user to grant access to
+   * @emits access_granted - Notifies the target user that access was granted
+   * @emits grant_access_success - Confirms to the admin that access was granted
+   * @emits grant_access_error - When granter lacks permissions or validation fails
+   */
+  socket.on("grant_access", async ({ roomId, targetUserId }) => {
+    if (!roomId) return;
+    if (!socket.data.userId) return;
+
+    if (!socket.rooms.has(roomId)) {
+      return socket.emit("grant_access_error", {
+        success: false,
+        message: "Debes estar en la sala para otorgar acceso",
+      });
+    }
+
+    const adminId = socket.data.userId;
+
+    const isAdmin = await existsAdmin(roomId, adminId);
+    const roomSnap = await db.collection("rooms").doc(roomId).get();
+    const creatorId = roomSnap.data()?.creatorId;
+
+    if (!isAdmin && adminId !== creatorId) {
+      return socket.emit("grant_access_error", {
+        success: false,
+        message: "No eres admin ni creador",
+      });
+    }
+
+    await createRoomAccess(targetUserId, roomId, adminId);
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room) return;
+
+    for (const socketId of room) {
+      const clientSocket = io.sockets.sockets.get(socketId);
+      if (!clientSocket) continue;
+
+      if (clientSocket.data.userId === targetUserId) {
+        clientSocket.emit("access_granted", {
+          // este es el evento que recibe el usuario
+          roomId,
+          message: "Tu acceso fue aceptado",
+        });
+      }
+    }
+
+    socket.emit("grant_access_success", {
+      success: true,
+      message: "Acceso creado",
+    });
   });
 
   // ===== LEAVE ROOM EVENT =====
-  socket.on("leaveRoom", async (payload) => {
-    try {
-      const { roomId, userId } = payload;
-      
-      console.log(`[ROOM] 🚪 User ${userId} leaving room ${roomId}`);
-
-      // Leave the Socket.IO room
-      socket.leave(roomId);
-
-      // Remove user connection
-      const { users: updatedUsers } = removeUserConnection(socket.id);
-
-      // Notify others in the room
-      socket.to(roomId).emit("userLeft", {
-        success: true,
-        message: `User ${user?.email} left the room`,
-        user,
-      });
-
-      // Update online users list for the room
-      const roomUsers = getUsersInRoom(roomId);
-      io.to(roomId).emit("usersOnline", roomUsers);
-
-      console.log(`[ROOM] ✅ User ${userId} left room ${roomId}`);
-    } catch (error: any) {
-      console.error("[ROOM] ❌ Error leaving room:", error.message);
-    }
-  });
-
-  // ===== DISCONNECT EVENT =====
-  socket.on("disconnect", async () => {
+  /**
+   * Handler for 'disconnect' event.
+   * Cleans up user connections when they disconnect from the server.
+   * Marks the connection as left in the database and notifies other users in the room.
+   *
+   * @event disconnect
+   * @param {string} reason - The reason for disconnection
+   * @emits userDisconnected - Notifies room members that a user has disconnected
+   */
+  socket.on("disconnect", async (reason) => {
     try {
       const roomId = socket.data.roomId;
       const userId = socket.data.userId;
 
-      console.log(`[DISCONNECT] 🔴 Socket ${socket.id} disconnected`);
+      console.log(`[DISCONNECT] Socket ${socket.id} disconnected`);
 
-      // Remove user connection
-      const { disconnectedUser } = removeUserConnection(socket.id);
-
-      if (disconnectedUser && roomId) {
-        // Notify others in the room
+      if (userId && roomId) {
+        await leftConnection(userId, roomId);
         socket.to(roomId).emit("userDisconnected", {
           success: true,
           message: `User ${user?.email} disconnected`,
-          user,
+          user: socket.data.user,
         });
-
-        // Update online users list for the room
-        const roomUsers = getUsersInRoom(roomId);
-        io.to(roomId).emit("usersOnline", roomUsers);
       }
+
+      await emitRoomUsersState(roomId);
     } catch (error: any) {
-      console.error("[DISCONNECT] ❌ Error handling disconnect:", error.message);
+      console.error("[ROOM] Error leaving room:", error.message);
     }
+  });
+
+  // ===== DISCONNECT EVENT =====
+  /**
+   * Handler for 'leaveRoom' event.
+   * Allows a user to explicitly leave a room without disconnecting from the server.
+   * Updates the connection status and notifies other room members.
+   *
+   * @event leaveRoom
+   * @emits userLeft - Notifies room members that a user has left the room
+   * @emits disconect_error - When an error occurs during the leave process
+   */
+  socket.on("leaveRoom", async () => {
+    try {
+      const roomId = socket.data.roomId;
+      const userId = socket.data.userId;
+
+      console.log(`[ROOM] User ${userId} leaving room ${roomId}`);
+
+      if (userId && roomId) {
+        await leftConnection(userId, roomId);
+        socket.to(roomId).emit("userLeft", {
+          success: true,
+          message: `User ${user?.email} left the room`,
+          user: socket.data.user,
+        });
+      }
+
+      socket.leave(roomId);
+
+      await emitRoomUsersState(roomId);
+    } catch (error: any) {
+      socket.emit("disconect_error", {
+        user: null,
+        message: "Error interno",
+        success: false,
+      });
+      console.error("[DISCONNECT] Error handling disconnect:", error.message);
+    }
+  });
+
+  // ===== END ROOM (HOST) EVENT =====
+  /**
+   * Handler for 'end_room' event.
+   * Broadcasts a room termination to all participants and forces them to leave.
+   * Intended to be emitted by the host when finalizing the meeting.
+   *
+   * @event end_room
+   * @emits room_ended - Notifies room members that the meeting has been ended
+   */
+  socket.on("end_room", async () => {
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    console.log(`[ROOM] 🔚 Ending room ${roomId} by ${socket.data.userId}`);
+    // Notify all users
+    io.to(roomId).emit("room_ended", {
+      success: true,
+      roomId,
+      message: "La reunión ha sido finalizada por el anfitrión",
+    });
+    // Make all sockets leave the room
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (room) {
+      for (const socketId of room) {
+        const clientSocket = io.sockets.sockets.get(socketId);
+        if (clientSocket) {
+          clientSocket.leave(roomId);
+        }
+      }
+    }
+    console.log(`[ROOM] ✅ Room ${roomId} ended and sockets left`);
   });
 });
 
 // ===== Start Server =====
 httpServer.listen(PORT, () => {
   console.log("=".repeat(60));
-  console.log(`[SERVER] 🚀 Charlaton Chat Microservice running on port ${PORT}`);
-  console.log(`[CORS] 🌐 Allowed origins:`, allowedOrigins.length > 0 ? allowedOrigins.join(", ") : "All origins (*)");
+  console.log(
+    `[SERVER] 🚀 Charlaton Chat Microservice running on port ${PORT}`
+  );
+  console.log(
+    `[CORS] 🌐 Allowed origins:`,
+    allowedOrigins.length > 0 ? allowedOrigins.join(", ") : "All origins (*)"
+  );
   console.log(`[FIREBASE] 🔥 Admin SDK initialized`);
   console.log(`[AUTH] 🔐 JWT authentication enabled`);
   console.log("=".repeat(60));
 });
 
-// Export for deployment (Vercel, Railway, Render)
+/**
+ * Export HTTP server instance for deployment platforms.
+ * Compatible with Vercel, Railway, Render, and other Node.js hosting services.
+ */
 export default httpServer;

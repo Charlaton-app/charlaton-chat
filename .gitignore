@@ -142,3 +142,5 @@ serviceAccount.json
 RENDER_DEPLOYMENT.md
 ENV_VARIABLES.md
 DEPLOYMENT.md
+.env
+firebase.json

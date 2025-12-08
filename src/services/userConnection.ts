@@ -52,15 +52,15 @@ export const getConnectionsByRoom = async (roomId: any) => {
  * @returns {Promise<{user: any, connection: any | null, success: boolean}>}
  *          Object containing the user ID, connection data, and success flag
  * @example
- * const result = await createConnection(123, "room456");
+ * const result = await createConnection(123, "room456", "firebase-uid-123");
  * if (result.success) {
  *   console.log("Connection created:", result.connection);
  * }
  */
-export const createConnection = async (userId: any, roomId: any) => {
+export const createConnection = async (userId: any, roomId: any, firebaseUid?: string) => {
   try {
     const userIdStr = String(userId);
-    console.log(`[CREATE_CONNECTION] Creating connection for userId: ${userIdStr}, roomId: ${roomId}`);
+    console.log(`[CREATE_CONNECTION] Creating connection for userId: ${userIdStr}, roomId: ${roomId}, firebaseUid: ${firebaseUid || 'not provided'}`);
 
     // Buscar conexión anterior - usar string para match con Firebase UIDs
     const snap = await ROOMS.doc(String(roomId))
@@ -74,12 +74,17 @@ export const createConnection = async (userId: any, roomId: any) => {
       const id = snap.docs[0].id;
       console.log(`[CREATE_CONNECTION] Refreshing existing connection ${id}`);
 
-      const updated = {
+      const updated: any = {
         userId: userIdStr,
         roomId: String(roomId),
         joinedAt: new Date().toISOString(),
         leftAt: null,
       };
+      
+      // Add firebaseUid if provided
+      if (firebaseUid) {
+        updated.firebaseUid = firebaseUid;
+      }
 
       await ROOMS.doc(String(roomId))
         .collection(CON_COLECTION)
@@ -94,12 +99,17 @@ export const createConnection = async (userId: any, roomId: any) => {
     const ref = ROOMS.doc(String(roomId)).collection(CON_COLECTION).doc();
     console.log(`[CREATE_CONNECTION] Creating new connection document ${ref.id}`);
 
-    const newConn = {
+    const newConn: any = {
       userId: userIdStr,
       roomId: String(roomId),
       joinedAt: new Date().toISOString(),
       leftAt: null,
     };
+    
+    // Add firebaseUid if provided
+    if (firebaseUid) {
+      newConn.firebaseUid = firebaseUid;
+    }
 
     await ref.set(newConn);
 

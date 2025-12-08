@@ -142,6 +142,63 @@ const io = new Server(httpServer, {
   },
 });
 
+// ===== Duplicate Join Prevention =====
+
+/**
+ * Track pending room joins to prevent duplicates from React StrictMode.
+ * Maps "userId:roomId" to a Set of timestamps.
+ */
+const pendingJoins = new Map<string, Set<string>>();
+
+/**
+ * Check if a join is already in progress for this user+room combination.
+ * This prevents React StrictMode from creating duplicate connections.
+ * 
+ * @param userId - The user ID
+ * @param roomId - The room ID  
+ * @returns true if join is already pending, false otherwise
+ */
+function isJoinPending(userId: string, roomId: string): boolean {
+  const key = `${userId}:${roomId}`;
+  const now = Date.now();
+  
+  if (!pendingJoins.has(key)) {
+    pendingJoins.set(key, new Set());
+  }
+  
+  const timestamps = pendingJoins.get(key)!;
+  
+  // Clean up old entries (older than 5 seconds)
+  for (const ts of timestamps) {
+    if (now - parseInt(ts) > 5000) {
+      timestamps.delete(ts);
+    }
+  }
+  
+  // If there's a recent join (within last 2 seconds), it's a duplicate
+  for (const ts of timestamps) {
+    if (now - parseInt(ts) < 2000) {
+      return true;
+    }
+  }
+  
+  // Mark this join as pending
+  timestamps.add(now.toString());
+  return false;
+}
+
+/**
+ * Clear pending join for a user+room combination.
+ * Call this after join completes or fails.
+ * 
+ * @param userId - The user ID
+ * @param roomId - The room ID
+ */
+function clearPendingJoin(userId: string, roomId: string): void {
+  const key = `${userId}:${roomId}`;
+  pendingJoins.delete(key);
+}
+
 // ===== HTTP REST Endpoints =====
 
 /**
@@ -360,9 +417,29 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Ensure userId is consistently set as string
-      const userId = String(socket.data.userId || user.id);
-      console.log(`[ROOM] 🔑 Using userId: ${userId}`);
+      // Get the Firebase UID
+      const firebaseUid = user.id;
+      console.log(`[ROOM] 🔑 Firebase UID: ${firebaseUid}`);
+
+      // Find the backend user document ID (userId) by Firebase UID
+      let userId = firebaseUid; // Default to Firebase UID
+      try {
+        const userQuery = await db.collection("users").where("uid", "==", firebaseUid).limit(1).get();
+        if (!userQuery.empty) {
+          userId = userQuery.docs[0].id; // Use backend document ID
+          console.log(`[ROOM] 📝 Mapped Firebase UID ${firebaseUid} → Backend ID ${userId}`);
+        } else {
+          console.log(`[ROOM] ⚠️ No user document found for Firebase UID ${firebaseUid}, using Firebase UID as userId`);
+        }
+      } catch (err) {
+        console.error(`[ROOM] ❌ Error fetching user document:`, err);
+      }
+
+      // Check for duplicate join (React StrictMode protection)
+      if (isJoinPending(userId, roomId)) {
+        console.log(`[ROOM] ⚠️ Duplicate join_room detected for ${userId} in ${roomId} - ignoring`);
+        return; // Silently ignore duplicate
+      }
 
       // Check if room exists
       const roomSnap = await db.collection("rooms").doc(roomId).get();
@@ -397,14 +474,15 @@ io.on("connection", (socket) => {
         console.log(`[ROOM] 🚪 Joining socket to room ${roomId}`);
         socket.join(roomId);
 
-        // Create connection in Firestore with userId as string
+        // Create connection in Firestore with backend userId and firebaseUid
         console.log(
-          `[ROOM] 💾 Creating Firestore connection for userId: ${userId}`
+          `[ROOM] 💾 Creating Firestore connection for userId: ${userId}, firebaseUid: ${firebaseUid}`
         );
-        const connectionSnap = await createConnection(userId, roomId);
+        const connectionSnap = await createConnection(userId, roomId, firebaseUid);
 
         if (!connectionSnap.success) {
           console.error(`[ROOM] ❌ Failed to create connection for ${userId}`);
+          clearPendingJoin(userId, roomId);
           socket.emit("join_room_error", {
             user: socket.data.user,
             message: "error al crear conexión",
@@ -414,6 +492,9 @@ io.on("connection", (socket) => {
         }
 
         console.log(`[ROOM] ✅ Connection created successfully for ${userId}`);
+
+        // Clear pending join lock
+        clearPendingJoin(userId, roomId);
 
         // Emit success ONLY to the joining user (not to room)
         socket.emit("join_room_success", {
@@ -451,6 +532,7 @@ io.on("connection", (socket) => {
           console.error(
             `[ROOM] ❌ User ${userId} has no access to private room ${roomId}`
           );
+          clearPendingJoin(userId, roomId);
           socket.emit("join_room_error", {
             user: user,
             message: "usuario sin permisos para sala privada",
@@ -466,6 +548,8 @@ io.on("connection", (socket) => {
       }
     } catch (error) {
       console.error(`[ROOM] ❌ Error in join_room for ${user.email}:`, error);
+      // Note: We can't call clearPendingJoin here because userId might not be defined
+      // The timeout in isJoinPending will clean up stale entries automatically
       socket.emit("join_room_error", {
         user,
         message: "Error interno del servidor",
@@ -759,7 +843,9 @@ io.on("connection", (socket) => {
    */
   socket.on("media_state_changed", async ({ micEnabled, cameraEnabled }) => {
     const roomId = socket.data.roomId;
-    const userId = socket.data.userId;
+    // CRITICAL: Always use socket.data.user.id (Firebase UID) for consistency with WebRTC
+    // This ensures media state events match the userId used in WebRTC signaling
+    const userId = socket.data.user?.id;
 
     if (!roomId || !userId) return;
 
